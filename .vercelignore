@@ -1,7 +1,4 @@
-app.py
 dev_server.py
-requirements-local.txt
-.streamlit
 output
 photos/rejected
 .env

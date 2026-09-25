@@ -1,46 +1,99 @@
 """Vercel Python function: POST /api/count
 
-Body (JSON): {"image": "<base64 JPEG>", "thresh": 0.4, "floors": "ai" | "geometric"}
-Returns:     {"width", "height", "boxes": [{x0,y0,x1,y1,conf,floor}], "n_floors", "note", "seconds"}
+Count a new photo:
+  {"image": "<base64 JPEG>", "thresh": 0.4, "floors": "ai" | "geometric"}
+Count only a drawn area of a photo already counted (no new detection):
+  {"image": ..., "area": [x0, y0, x1, y1], "boxes": [<boxes from the first answer>], "floors": ...}
 
+Returns {"width", "height", "boxes": [{x0,y0,x1,y1,conf,floor,edge,other_side,weak,region}],
+         "regions": [{id,label,polygon,windows,n_floors,note,floors_check}], "selected": [ids],
+         "n_floors", "note", "floors_check", "seconds"}
+or {"error": "...", "code": "..."} with a 4xx/5xx status.
+
+If the ACCESS_CODE environment variable is set, every request must send it in the X-Access-Code header.
 Pricing and drawing happen in the browser, so changing a price never calls this again.
 """
 import base64
+import hmac
 import io
 import json
 import os
 import sys
 import time
+from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _core import Box, load_env, run_area, run_side  # noqa: E402
+from _core import MAX_BOXES, Box, load_env, run_area, run_side  # noqa: E402
 
 from PIL import Image, ImageOps  # noqa: E402
 
 load_env()
 MAX_SIDE = 1600
+MAX_PIXELS = 40_000_000  # ~40 MP: bigger than any phone photo; stops decompression bombs
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+
+# Best effort per-address limit. Serverless instances are short-lived and separate, so this only slows
+# down a burst from one address on one warm instance; the ACCESS_CODE is the real gate.
+RATE_LIMIT, RATE_WINDOW_S = 40, 600
+_hits: dict[str, deque] = defaultdict(deque)
 
 
-def process(body: bytes) -> tuple[int, dict]:
+def _rate_ok(ip: str) -> bool:
+    now = time.time()
+    q = _hits[ip]
+    while q and now - q[0] > RATE_WINDOW_S:
+        q.popleft()
+    if len(q) >= RATE_LIMIT:
+        return False
+    q.append(now)
+    return True
+
+
+def _load_image(raw_b64: str) -> Image.Image:
+    data = base64.b64decode(raw_b64.split(",", 1)[-1])  # accept a data: URL or bare base64
+    im = Image.open(io.BytesIO(data))
+    w, h = im.size
+    if w * h > MAX_PIXELS:
+        raise ValueError(f"the image is {w}x{h}, too large; send a photo under 40 megapixels")
+    im.draft("RGB", (MAX_SIDE, MAX_SIDE))  # JPEGs decode straight at a smaller size: fast, low memory
+    im.thumbnail((MAX_SIDE, MAX_SIDE))      # shrink before rotating, never after
+    return ImageOps.exif_transpose(im).convert("RGB")
+
+
+def process(body: bytes, access_code: str | None = None, ip: str = "local") -> tuple[int, dict]:
+    want = os.environ.get("ACCESS_CODE", "")
+    if want and not hmac.compare_digest(want, access_code or ""):
+        return 401, {"error": "This needs the access code.", "code": "auth"}
+    if not _rate_ok(ip):
+        return 429, {"error": "Too many photos in a short time. Wait a few minutes and try again.", "code": "rate"}
     try:
         req = json.loads(body or b"{}")
-        raw = req["image"].split(",", 1)[-1]  # accept a data: URL or bare base64
-        img = ImageOps.exif_transpose(Image.open(io.BytesIO(base64.b64decode(raw)))).convert("RGB")
+        if not isinstance(req, dict) or not isinstance(req.get("image"), str):
+            raise ValueError("send the photo as base64 in \"image\"")
+        img = _load_image(req["image"])
+        thresh = min(max(float(req.get("thresh", 0.4)), 0.2), 0.8)
+        floors = req.get("floors") if req.get("floors") in ("ai", "geometric") else "ai"
+        area = req.get("area")
+        boxes = None
+        if area is not None:
+            if not (isinstance(area, list) and len(area) == 4):
+                raise ValueError("\"area\" must be [x0, y0, x1, y1]")
+            area = [float(v) for v in area]
+            raw = req.get("boxes")
+            if not isinstance(raw, list):
+                raise ValueError("\"area\" needs the \"boxes\" from the first count")
+            if len(raw) > MAX_BOXES:
+                raise ValueError(f"too many boxes (over {MAX_BOXES})")
+            boxes = [Box(float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"]), float(b["conf"]),
+                         weak=bool(b.get("weak"))) for b in raw]
     except Exception as e:
-        return 400, {"error": f"Could not read the image ({e})"}
-    img.thumbnail((MAX_SIDE, MAX_SIDE))
-    thresh = float(req.get("thresh", 0.4))
-    floors = req.get("floors", "ai") if req.get("floors") in ("ai", "geometric") else "ai"
+        return 400, {"error": f"Could not read the request: {e}", "code": "bad_request"}
     t = time.time()
     try:
-        if req.get("area") and req.get("boxes"):  # the viewer drew the area to count: no new detection
-            boxes = [Box(b["x0"], b["y0"], b["x1"], b["y1"], b["conf"], weak=bool(b.get("weak"))) for b in req["boxes"]]
-            res = run_area(img, boxes, req["area"])
-        else:
-            res = run_side(img, floors=floors, thresh=thresh)
+        res = run_area(img, boxes, area, floors=floors) if area is not None else run_side(img, floors=floors, thresh=thresh)
     except Exception as e:
-        return 502, {"error": f"Window detection failed ({str(e)[:200]})"}
+        return 502, {"error": f"Window detection failed ({str(e)[:200]}). Try again in a moment.", "code": "upstream"}
     return 200, {
         "width": img.width, "height": img.height,
         "boxes": [{"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "conf": b.conf, "floor": int(b.floor),
@@ -56,20 +109,23 @@ def process(body: bytes) -> tuple[int, dict]:
 
 
 class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("content-length") or 0))
-        status, payload = process(body)
+    def _send(self, status: int, payload: dict):
         out = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(out)))
         self.end_headers()
         self.wfile.write(out)
 
+    def do_POST(self):
+        length = int(self.headers.get("content-length") or 0)
+        if length > 6_000_000:
+            return self._send(413, {"error": "The photo is too large to upload.", "code": "too_large"})
+        body = self.rfile.read(length)
+        ip = (self.headers.get("x-forwarded-for") or self.client_address[0] or "?").split(",")[0].strip()
+        status, payload = process(body, self.headers.get("x-access-code"), ip)
+        self._send(status, payload)
+
     def do_GET(self):
-        out = json.dumps({"ok": True, "keys": {k: bool(os.environ.get(k)) for k in
-                                               ("ROBOFLOW_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")}}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(out)
+        self._send(200, {"ok": True})

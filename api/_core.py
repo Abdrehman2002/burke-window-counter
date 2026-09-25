@@ -18,6 +18,28 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
 
+# One time budget per request. Vercel stops the function at 60 s, and a call still running when it is
+# stopped is still billed, so every outside call sizes its timeout from what is left of this budget.
+BUDGET_S = float(os.environ.get("BUDGET_S", "50"))
+_DEADLINE = 0.0  # set at the start of each run (one request per function instance on Vercel)
+MAX_BOXES = 400  # more than any real facade; caps the work a single request can cause
+
+
+def start_budget():
+    global _DEADLINE
+    _DEADLINE = time.time() + BUDGET_S
+
+
+def remaining() -> float:
+    return (_DEADLINE - time.time()) if _DEADLINE else 1e9
+
+
+def _read_timeout(cap: float) -> float:
+    left = remaining() - 2
+    if left < 3:
+        raise TimeoutError("out of time for this photo")
+    return min(cap, left)
+
 # Burke's pricing: floor n costs BASE_PRICE * MULTIPLIER ** (n - 1) per window.
 BASE_PRICE = 3.0
 MULTIPLIER = 2.0
@@ -86,7 +108,7 @@ def _sam3_boxes(pred_list) -> list[Box]:
     return boxes
 
 
-def _roboflow_post(payload: dict, tries=3) -> dict:
+def _roboflow_post(payload: dict, tries=2) -> dict:
     """POST to Roboflow's hosted SAM 3, retrying server errors and timeouts (they happen now and then,
     and with 6 calls per photo one blip would otherwise sink the whole side)."""
     last = None
@@ -94,7 +116,7 @@ def _roboflow_post(payload: dict, tries=3) -> dict:
         try:
             r = requests.post("https://serverless.roboflow.com/sam3/concept_segment",
                               headers={"Authorization": f"Bearer {os.environ['ROBOFLOW_API_KEY']}"},
-                              json=payload, timeout=60)
+                              json=payload, timeout=(5, _read_timeout(20)))
             if r.status_code >= 500 or r.status_code == 429:
                 last = RuntimeError(f"Roboflow {r.status_code}")
             else:
@@ -102,8 +124,10 @@ def _roboflow_post(payload: dict, tries=3) -> dict:
                 return r.json()
         except requests.exceptions.RequestException as e:
             last = e
+        if remaining() < 10:
+            break
         time.sleep(0.8 * (attempt + 1))
-    raise RuntimeError(f"window detector unavailable after {tries} tries ({last})")
+    raise RuntimeError(f"window detector unavailable ({last})")
 
 
 def _sam3_call(img: Image.Image, thresh=0.4, prompt="window") -> list[Box]:
@@ -156,17 +180,24 @@ def detect_sam3(img: Image.Image, thresh=0.4, prompt="window") -> list[Box]:
                 out.append(bx)
         return out
 
+    failed = []
+
     def safe(job):
         try:
             return run(job)
         except Exception:
             if job is None:  # the whole-photo pass is the backbone: if it fails, the side fails
                 raise
+            failed.append(job)
             return []        # one tile failing costs a little recall, never the whole quote
 
     with ThreadPoolExecutor(len(jobs)) as ex:
         parts = list(ex.map(safe, jobs))
+    detect_sam3.failed_tiles = len(failed)
     return [b for p in parts for b in p]
+
+
+detect_sam3.failed_tiles = 0
 
 
 def detect_gemini(img: Image.Image, model=GEMINI_MODEL) -> list[Box]:
@@ -187,7 +218,11 @@ def _gemini_json(model: str, img: Image.Image, prompt: str, tries=3, timeout=75)
     """One Gemini call returning JSON text. The free preview model throws 503s and stalls, so:
     short timeout, low thinking, a few retries. Raises if every try fails."""
     last = None
+    if remaining() < 20:
+        raise TimeoutError("no time left for the fallback model")
     for attempt in range(tries):
+        if remaining() < 15:
+            break
         try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -196,7 +231,7 @@ def _gemini_json(model: str, img: Image.Image, prompt: str, tries=3, timeout=75)
                                               {"text": prompt}]}],
                       "generationConfig": {"response_mime_type": "application/json", "temperature": 0,
                                            "thinkingConfig": {"thinkingLevel": "low"}}},
-                timeout=timeout)
+                timeout=(5, _read_timeout(timeout)))
             if r.status_code in (429, 500, 503):
                 last = RuntimeError(f"Gemini {r.status_code}")
                 time.sleep(2 + 3 * attempt)
@@ -267,97 +302,29 @@ def clean(boxes: list[Box]) -> list[Box]:
 def _merge_stacked(boxes: list[Box]) -> list[Box]:
     """A tall window sometimes comes back as two boxes, top half and bottom half. Merge two boxes that
     share almost the same left and right edges and touch vertically. Windows on different floors have
-    a band of wall between them, so they never touch like this."""
-    merged = True
-    while merged:
-        merged = False
-        for i, a in enumerate(boxes):
-            for j, b in enumerate(boxes):
-                if j <= i:
-                    continue
-                overlap_w = min(a.x1, b.x1) - max(a.x0, b.x0)
-                if overlap_w < 0.8 * max(a.w, b.w):
-                    continue
-                gap = max(a.y0, b.y0) - min(a.y1, b.y1)  # negative = they overlap
-                if gap < 0.08 * min(a.h, b.h):
-                    boxes[i] = Box(min(a.x0, b.x0), min(a.y0, b.y0), max(a.x1, b.x1), max(a.y1, b.y1),
+    a band of wall between them, so they never touch like this. One sweep in x order: only boxes that
+    overlap horizontally are compared."""
+    boxes = sorted(boxes, key=lambda b: b.x0)
+    i = 0
+    while i < len(boxes):
+        a = boxes[i]
+        j = i + 1
+        while j < len(boxes) and boxes[j].x0 < a.x1:
+            b = boxes[j]
+            overlap_w = min(a.x1, b.x1) - max(a.x0, b.x0)
+            gap = max(a.y0, b.y0) - min(a.y1, b.y1)  # negative = they overlap
+            if overlap_w >= 0.8 * max(a.w, b.w) and gap < 0.08 * min(a.h, b.h):
+                a = boxes[i] = Box(min(a.x0, b.x0), min(a.y0, b.y0), max(a.x1, b.x1), max(a.y1, b.y1),
                                    min(a.conf, b.conf))
-                    del boxes[j]
-                    merged = True
-                    break
-            if merged:
-                break
+                del boxes[j]
+                j = i + 1  # the grown box may now touch one we already passed
+                continue
+            j += 1
+        i += 1
     return boxes
 
 
 # ---------- 2. floors ----------
-
-def assign_floors(boxes: list[Box]) -> int:
-    """Group boxes into rows by vertical position. Bottom row = floor 1. Returns number of floors.
-
-    A box joins a row when its vertical centre sits inside that row's typical vertical span.
-    Never assumes a grid: a row of 3 and a row of 11 are both just rows.
-    """
-    if not boxes:
-        return 0
-    rows: list[list[Box]] = []
-    for b in sorted(boxes, key=lambda b: b.cy):
-        placed = False
-        for row in rows:
-            top = np.median([r.y0 for r in row])
-            bot = np.median([r.y1 for r in row])
-            pad = 0.15 * (bot - top)
-            if top - pad <= b.cy <= bot + pad:
-                row.append(b)
-                placed = True
-                break
-        if not placed:
-            rows.append([b])
-    rows.sort(key=lambda row: np.median([r.cy for r in row]), reverse=True)  # bottom first
-    for n, row in enumerate(rows, start=1):
-        for b in row:
-            b.floor = n
-    return len(rows)
-
-
-def build_rows(boxes: list[Box], min_overlap=0.5) -> list[list[Box]]:
-    """Windows on the same storey form a row. Each window links only to its BEST neighbour on each side:
-    the box beside it whose height range overlaps its own the most. A row that slopes (a photo looking
-    up at a tall building) still chains along itself, but can't jump diagonally to the next storey.
-    Pure geometry, so the same photo always gives the same rows. Returned bottom row first."""
-    n = len(boxes)
-    parent = list(range(n))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def overlap(a: Box, c: Box) -> float:
-        return (min(a.y1, c.y1) - max(a.y0, c.y0)) / min(a.h, c.h)
-
-    for i, a in enumerate(boxes):
-        acx = (a.x0 + a.x1) / 2
-        for side in (-1, 1):
-            best, best_score = -1, min_overlap
-            for j, c in enumerate(boxes):
-                if j == i or side * ((c.x0 + c.x1) / 2 - acx) <= 0:
-                    continue
-                ov = overlap(a, c)
-                if ov <= min_overlap:
-                    continue
-                # prefer the most level neighbour, then the closest one
-                score = ov - 0.02 * abs((c.x0 + c.x1) / 2 - acx) / max(a.w, 1)
-                if score > best_score:
-                    best, best_score = j, score
-            if best >= 0:
-                parent[find(i)] = find(best)
-    groups: dict[int, list[Box]] = {}
-    for i, b in enumerate(boxes):
-        groups.setdefault(find(i), []).append(b)
-    return sorted(groups.values(), key=lambda row: np.median([b.cy for b in row]), reverse=True)
-
 
 def _same_floor_pairs(boxes: list[Box]) -> list[tuple[int, int]]:
     """Each window paired with its most level neighbour on each side (overlap > half its height)."""
@@ -465,7 +432,9 @@ def vp_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
     # would bridge floors together. Build the floors from the windows that do, then hang the rest on the
     # floor whose landed position is nearest.
     core = set(range(n))
-    if v is not None and len(pairs) >= 6:
+    # Only on a big facade: on a small house a window with no side-by-side partner (an attic window)
+    # is normal and must keep its own floor.
+    if v is not None and n >= 20 and len(pairs) >= 6:
         fits = _pair_fits(boxes, pairs, v)
         on_line = {i for (i, j), ok in zip(pairs, fits) if ok for i in (i, j)}
         if len(on_line) >= 0.6 * n:
@@ -502,117 +471,6 @@ def vp_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
     return rows, is_grid
 
 
-def lattice_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
-    """Floors the way a person counts them: go up a column of windows.
-
-    Two local rules, each only between neighbouring windows:
-      - the most level window beside you is on the SAME floor;
-      - the nearest window directly above you is ONE floor up (if the gap is a normal floor's height).
-    Following those links across the wall gives every window a floor. Because each rule only compares
-    neighbours, sloping rows in a photo taken looking up (perspective) don't break it.
-    Returns (rows bottom-first, is_grid). is_grid is True when most windows have a window above or below,
-    i.e. a regular facade where this geometry can be trusted on its own."""
-    n = len(boxes)
-    if n == 0:
-        return [], False
-    cx = [(b.x0 + b.x1) / 2 for b in boxes]
-    edges: list[tuple[int, int, int]] = []  # (i, j, level_j - level_i)
-
-    # same floor: best neighbour on each side
-    for i, a in enumerate(boxes):
-        for side in (-1, 1):
-            best, best_score = -1, 0.5
-            for j, c in enumerate(boxes):
-                if j == i or side * (cx[j] - cx[i]) <= 0:
-                    continue
-                ov = (min(a.y1, c.y1) - max(a.y0, c.y0)) / min(a.h, c.h)
-                if ov <= 0.5:
-                    continue
-                score = ov - 0.02 * abs(cx[j] - cx[i]) / max(a.w, 1)
-                if score > best_score:
-                    best, best_score = j, score
-            if best >= 0:
-                edges.append((i, best, 0))
-
-    # one floor up: nearest window above that shares most of its width
-    ups: list[tuple[int, int, float]] = []
-    for i, a in enumerate(boxes):
-        best, dist = -1, None
-        for j, c in enumerate(boxes):
-            if j == i or c.cy >= a.cy - 0.5 * min(a.h, c.h):
-                continue
-            xov = (min(a.x1, c.x1) - max(a.x0, c.x0)) / min(a.w, c.w)
-            if xov < 0.4:
-                continue
-            d = a.cy - c.cy
-            if dist is None or d < dist:
-                best, dist = j, d
-        if best >= 0:
-            ups.append((i, best, dist))
-    linked = set()
-    pitch_all = float(np.median([d for _, _, d in ups])) if ups else float(np.median([b.h for b in boxes])) * 1.6
-    if len(ups) >= 3:
-        pitch = float(np.median([d for _, _, d in ups]))
-        for i, j, d in ups:
-            a, c = boxes[i], boxes[j]
-            if 0.55 * pitch <= d <= max(1.6 * pitch, 0.95 * (a.h + c.h)):
-                edges.append((i, j, 1))
-                linked.update((i, j))
-    is_grid = n >= 12 and len(linked) >= 0.6 * n
-
-    # walk the links: each connected group gets relative floor numbers
-    adj: dict[int, list[tuple[int, int]]] = {i: [] for i in range(n)}
-    for i, j, d in edges:
-        adj[i].append((j, d))
-        adj[j].append((i, -d))
-    level = [None] * n
-    comps: list[list[int]] = []
-    for root in sorted(range(n), key=lambda k: -len(adj[k])):
-        if level[root] is not None:
-            continue
-        level[root] = 0
-        comp, queue = [root], [root]
-        while queue:
-            u = queue.pop()
-            for v, d in adj[u]:
-                if level[v] is None:
-                    level[v] = level[u] + d
-                    comp.append(v)
-                    queue.append(v)
-        comps.append(comp)
-
-    # line the groups up with each other: the biggest group is the reference; every other group is
-    # shifted to agree with the placed windows it overlaps in height (or, failing that, the nearest one)
-    comps.sort(key=len, reverse=True)
-    placed = list(comps[0])
-    for comp in comps[1:]:
-        votes: dict[int, int] = {}
-        for u in comp:
-            a = boxes[u]
-            same = [p for p in placed if (min(a.y1, boxes[p].y1) - max(a.y0, boxes[p].y0)) > 0.5 * min(a.h, boxes[p].h)]
-            if same:  # level with a placed window: same floor as the nearest such one
-                p = min(same, key=lambda p: abs(cx[p] - cx[u]))
-                off = level[p] - level[u]
-            else:     # not level with anything placed: count whole floors up or down from the nearest one
-                p = min(placed, key=lambda p: abs(boxes[p].cy - a.cy) + 0.3 * abs(cx[p] - cx[u]))
-                dy = boxes[p].cy - a.cy  # positive = u is higher up the photo
-                steps = int(round(dy / pitch_all)) if pitch_all else 0
-                if steps == 0:
-                    steps = 1 if dy > 0 else -1
-                off = level[p] + steps - level[u]
-            votes[off] = votes.get(off, 0) + 1
-        off = max(votes, key=lambda k: votes[k])
-        for u in comp:
-            level[u] += off
-        placed.extend(comp)
-
-    lo = min(level)
-    rows: dict[int, list[Box]] = {}
-    for i, b in enumerate(boxes):
-        rows.setdefault(level[i] - lo, []).append(b)
-    return [rows[k] for k in sorted(rows)], is_grid
-
-
 def _rows_picture(img: Image.Image, rows: list[list[Box]]) -> Image.Image:
     """The photo with each row's windows outlined in its own colour and a big R1, R2... label beside it."""
     out = img.convert("RGB").copy()
@@ -644,25 +502,9 @@ def _rows_picture(img: Image.Image, rows: list[list[Box]]) -> Image.Image:
     return out
 
 
-ROWS_PROMPT = (
-    "This photo is meant to show ONE side of a building for a window-cleaning quote. Its windows have been "
-    "grouped into horizontal rows by height; each row's windows are outlined in one colour and labelled "
-    "R1, R2 ... from the BOTTOM up. Yellow vertical lines numbered 0 to 10 mark positions across the photo. "
-    "1) SIDE: which part of the photo is the one wall being quoted, meaning the wall that faces the camera "
-    "most directly? Give the grid positions where it starts and ends. Bay windows, turrets, towers, porches "
-    "and wings that stick out from this side are PART of it, even though their faces are angled. Only leave "
-    "out a wall that turns the corner away from the camera (a corner shot's second side), and separate "
-    "buildings next door. Attached rowhouses or townhouses sharing one continuous front wall are ONE side, so include "
-    "all of them. If the whole photo is one wall, answer 0 and 10. "
-    "2) STOREYS: for each row, which storey of that wall is it on? Storey 1 is the lowest level with windows. "
-    "Rows on the same level are the same storey (a small window and a tall bay window beside it, a porch "
-    "window and a main window). A dormer, gable or turret-top window is on the storey it sits at. A higher row "
-    "is never on a lower storey than a row below it. Rows: {rows}. "
-    "3) TOTAL: how many storeys does that wall have, counting every level that has windows? "
-    'Return JSON only: {{"side_from": 0, "side_to": 10, "storeys": {{"R1": 1, "R2": 2}}, "total_storeys": 2}}')
-
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
-VOTES = int(os.environ.get("VOTES", "3"))
+AI_REGIONS = 3  # buildings per photo whose storeys the model reads; the rest use geometry
+VOTES = max(1, int(os.environ.get("VOTES", "3")))
 
 
 def _openai_json(img: Image.Image, prompt: str, model=OPENAI_MODEL, timeout=90) -> str:
@@ -676,7 +518,7 @@ def _openai_json(img: Image.Image, prompt: str, model=OPENAI_MODEL, timeout=90) 
                   {"type": "text", "text": prompt},
                   {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_jpeg_b64(img)}",
                                                       "detail": "high"}}]}]},
-        timeout=timeout)
+        timeout=(5, _read_timeout(min(timeout, 40))))
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
@@ -701,36 +543,6 @@ def _set_floors(rows: list[list[Box]], storeys: list[int]) -> int:
     return len(levels)
 
 
-def _extend_wall(boxes: list[Box]):
-    """The model gives the wall's edges on a coarse 0-10 grid, so a window right at the end of a floor can
-    fall just outside. Pull a window back in when it is level with a counted window and sits at the
-    wall's usual window spacing from it. Windows on another wall are much further from any counted window,
-    so they stay out. Repeats until nothing changes, so a run of windows can be pulled in one by one."""
-    counted = [b for b in boxes if b.counted]
-    gaps = []
-    for i, j in _same_floor_pairs(counted):
-        a, c = counted[i], counted[j]
-        gaps.append(abs((a.x0 + a.x1) / 2 - (c.x0 + c.x1) / 2))
-    if len(gaps) < 3:
-        return
-    step = float(np.median(gaps))
-    changed = True
-    while changed:
-        changed = False
-        for b in boxes:
-            if not b.other_side or b.edge:
-                continue
-            bcx = (b.x0 + b.x1) / 2
-            for c in boxes:
-                if not c.counted:
-                    continue
-                level = (min(b.y1, c.y1) - max(b.y0, c.y0)) > 0.5 * min(b.h, c.h)
-                if level and abs((c.x0 + c.x1) / 2 - bcx) <= 1.6 * step:
-                    b.other_side = False
-                    changed = True
-                    break
-
-
 STOREYS_PROMPT = (
     "This photo shows ONE building wall for a window-cleaning quote. Its windows have been grouped into "
     "horizontal rows by height; each row's windows are outlined in one colour and labelled R1, R2 ... from "
@@ -752,12 +564,21 @@ def _ask_votes(picture: Image.Image, prompt: str, provider: str) -> list[dict]:
     answers = []
     for f in futs:
         try:
-            answers.append(json.loads(f.result()))
+            a = json.loads(f.result())
         except Exception:
-            pass
+            continue
+        if isinstance(a, dict) and isinstance(a.get("storeys"), dict):
+            answers.append(a)
     if not answers:
         raise RuntimeError("no usable answer from the vision model")
     return answers
+
+
+def _as_int(v, default=0) -> int:
+    try:
+        return int(round(float(v)))
+    except (TypeError, ValueError):
+        return default
 
 
 def floors_for_wall(img: Image.Image, boxes: list[Box], provider="openai") -> tuple[int, int | None]:
@@ -784,9 +605,9 @@ def floors_for_wall(img: Image.Image, boxes: list[Box], provider="openai") -> tu
             picture = _rows_picture(img, rows).crop(crop)
             prompt = STOREYS_PROMPT.format(rows=", ".join(f"R{k + 1}" for k in range(len(rows))))
             answers = _ask_votes(picture, prompt, provider)
-            storeys = [int(round(med([int(a.get("storeys", {}).get(f"R{k + 1}", 0) or 0) for a in answers])))
+            storeys = [int(round(med([_as_int(a["storeys"].get(f"R{k + 1}")) for a in answers])))
                        for k in range(len(rows))]
-            totals = [int(a["total_storeys"]) for a in answers if str(a.get("total_storeys", "")).isdigit()]
+            totals = [_as_int(a.get("total_storeys")) for a in answers if _as_int(a.get("total_storeys")) > 0]
             seen = int(round(med(totals))) if totals else None
         n = _set_floors(rows, storeys)
     if n >= 3:
@@ -801,6 +622,18 @@ def floors_for_wall(img: Image.Image, boxes: list[Box], provider="openai") -> tu
             near = min(live, key=lambda c: abs(c.cy - b.cy) + 0.2 * abs((c.x0 + c.x1) / 2 - (b.x0 + b.x1) / 2))
             b.floor = near.floor
     return n, seen
+
+
+def _floor_the_rest(boxes: list[Box]):
+    """Windows not counted (edge, low confidence) still get the floor of the nearest counted window, so
+    if the viewer clicks one back in it is priced on a real floor."""
+    live = [b for b in boxes if b.counted and b.floor > 0]
+    for b in boxes:
+        if (not b.counted or b.floor <= 0) and live:
+            near = min(live, key=lambda c: abs(c.cy - b.cy) + 0.2 * abs((c.x0 + c.x1) / 2 - (b.x0 + b.x1) / 2))
+            b.floor = near.floor
+        elif b.floor <= 0:
+            b.floor = 1
 
 
 def segment_buildings(img: Image.Image, thresh=0.4) -> list[list[list[float]]]:
@@ -944,6 +777,10 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
     """Every building (and, in a corner shot, every wall) in the photo, numbered left to right, each with
     its windows. Sets box.region. The viewer picks which ones this side's quote covers."""
     masks = [_raster(p, img.size) for p in polys]
+    mask_pts = []
+    for m in masks:  # every other pixel is plenty for "which building is nearest"
+        ys, xs = np.nonzero(m[::2, ::2])
+        mask_pts.append((xs * 2, ys * 2))
     groups: dict[int, list[Box]] = {}
     for b in boxes:
         k = -1
@@ -955,7 +792,7 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
                 k = min(hits, key=lambda i: masks[i].sum())  # the smaller building in front wins
             else:
                 def dist(i):
-                    ys, xs = np.nonzero(masks[i])
+                    xs, ys = mask_pts[i]
                     return float(np.min((xs - x) ** 2 + (ys - y) ** 2)) if len(xs) else 1e18
                 k = min(range(len(masks)), key=dist)
         groups.setdefault(k, []).append(b)
@@ -989,58 +826,6 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
         r["label"] = label
         r["windows"] = sum(1 for b in r["boxes"] if b.counted)
     return regions
-
-
-def assign_floors_llm(img: Image.Image, boxes: list[Box], provider="openai") -> tuple[int, int | None]:
-    """Geometry makes the rows; a vision model answers two small questions: which part of the photo is the
-    one wall being quoted, and which storey each ROW is on. It never deletes or adds a window: windows off
-    that wall are only marked other_side, and a click brings any of them back."""
-    if not boxes:
-        return 0, None
-    rows, is_grid = vp_rows(boxes)
-    prompt = ROWS_PROMPT.format(rows=", ".join(f"R{k + 1}" for k in range(len(rows))))
-    picture = _rows_picture(img, rows)
-    # Ask 3 times in parallel and take the middle answer: one reading of "which wall" or "which storey"
-    # varies from run to run, the median of three barely does. Same wall-clock time as one call.
-    from concurrent.futures import ThreadPoolExecutor
-    ask = (lambda: _openai_json(picture, prompt)) if provider == "openai" else (lambda: _gemini_json(GEMINI_MODEL, picture, prompt))
-    with ThreadPoolExecutor(VOTES) as ex:
-        futs = [ex.submit(ask) for _ in range(VOTES)]
-    answers = []
-    for f in futs:
-        try:
-            answers.append(json.loads(f.result()))
-        except Exception:
-            pass
-    if not answers:
-        raise RuntimeError("no usable answer from the vision model")
-    med = lambda xs: float(np.median(xs))
-    lo = min(max(med([float(a.get("side_from", 0)) for a in answers]), 0), 10) / 10 * img.width
-    hi = min(max(med([float(a.get("side_to", 10)) for a in answers]), 0), 10) / 10 * img.width
-    storey_votes = [[int(a.get("storeys", {}).get(f"R{k + 1}", 0) or 0) for a in answers] for k in range(len(rows))]
-    ans = {"storeys": {f"R{k + 1}": int(round(med(v))) for k, v in enumerate(storey_votes)}}
-    totals = [int(a["total_storeys"]) for a in answers if str(a.get("total_storeys", "")).isdigit()]
-    seen_storeys = int(round(med(totals))) if totals else None
-    if hi - lo < 0.15 * img.width:  # an implausibly narrow answer: ignore it rather than drop most windows
-        lo, hi = 0, img.width
-    for b in boxes:
-        cx = (b.x0 + b.x1) / 2
-        b.other_side = bool(cx < lo or cx > hi)
-    if is_grid:  # only on a long regular wall is "same level, usual spacing" safe evidence of the same wall
-        _extend_wall(boxes)
-    if is_grid:
-        # A regular facade: geometry is more reliable than the model's reading. Redo the rows from the
-        # windows on the wall being quoted only, so the other wall can't bend the perspective estimate.
-        on_wall = [b for b in boxes if b.counted]
-        wall_rows, _ = vp_rows(on_wall) if len(on_wall) >= 4 else (rows, True)
-        n = _set_floors(wall_rows, list(range(1, len(wall_rows) + 1)))
-        for b in boxes:  # windows off this wall still need a floor in case someone clicks them back in
-            if not b.counted:
-                near = min(on_wall, key=lambda c: abs(c.cy - b.cy) + 0.2 * abs((c.x0 + c.x1) / 2 - (b.x0 + b.x1) / 2)) if on_wall else None
-                b.floor = near.floor if near else 1
-    else:
-        n = _set_floors(rows, [ans.get("storeys", {}).get(f"R{k + 1}", 0) for k in range(len(rows))])
-    return n, seen_storeys  # seen_storeys: the model's own storey count, used as a cross-check
 
 
 def _merge_close_floors(boxes: list[Box]) -> int:
@@ -1255,6 +1040,8 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     numbered region with its own floors (so two buildings of different heights never mix). The quote
     covers the region(s) the viewer picks; by default the one with the most windows."""
     from concurrent.futures import ThreadPoolExecutor
+    start_budget()
+    detect_sam3.failed_tiles = 0
     with ThreadPoolExecutor(2) as ex:
         f_win = ex.submit(lambda: detect_sam3(img, thresh) if detector == "sam3" else detect_gemini(img))
         f_bld = ex.submit(lambda: segment_buildings(img))
@@ -1264,6 +1051,8 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
         except Exception:
             polys = []  # no building outlines: the whole photo is one region
     boxes = clean(raw)
+    if len(boxes) > MAX_BOXES:  # more than any real facade: keep the most confident
+        boxes = sorted(boxes, key=lambda b: b.conf, reverse=True)[:MAX_BOXES]
     # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time.
     # Kept and drawn, but not counted unless clicked back.
     W = img.width
@@ -1274,21 +1063,31 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     res = SideResult(name, boxes)
     res.regions = regions
 
+    # The model reads storeys for the few biggest buildings only; small ones in the background get
+    # geometry. Caps what one photo can cost however many buildings it shows.
+    ai_ids = {r["id"] for r in sorted(regions, key=lambda r: -r["windows"])[:AI_REGIONS] if r["windows"] > 0}
+
     def do(region):
         bs = region["boxes"]
-        if floors != "ai":
-            return assign_floors_rows([b for b in bs if b.counted] or bs), None, ""
+        if floors != "ai" or region["id"] not in ai_ids:
+            live = [b for b in bs if b.counted]
+            n = assign_floors_rows(live) if live else 0
+            _floor_the_rest(bs)
+            return n, None, ""
+        errs = []
         for provider in ("openai", "gemini"):
             if not os.environ.get("OPENAI_API_KEY" if provider == "openai" else "GEMINI_API_KEY"):
                 continue
             try:
                 n, seen = floors_for_wall(img, bs, provider)
+                _floor_the_rest(bs)
                 return n, seen, ""
             except Exception as e:  # never let one flaky API sink the quote
-                err = f"{provider} failed ({str(e)[:60]}). "
+                errs.append(f"{provider}: {str(e)[:60]}")
         live = [b for b in bs if b.counted]
         n = assign_floors_rows(live) if live else 0
-        return n, None, "Used geometric floors."
+        _floor_the_rest(bs)
+        return n, None, "Floors from geometry only (the AI check was unavailable: " + "; ".join(errs) + ")."
 
     with ThreadPoolExecutor(max(1, len(regions))) as ex:
         outs = list(ex.map(do, regions))
@@ -1304,13 +1103,17 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     with_windows = [r for r in regions if r["windows"] > 0]
     res.selected = [max(with_windows, key=lambda r: r["windows"])["id"]] if with_windows else []
     sel = [r for r in regions if r["id"] in res.selected]
-    res.floors_check = any(r["floors_check"] for r in sel)
+    if getattr(detect_sam3, "failed_tiles", 0):
+        for r in regions:
+            r["note"] = (r["note"] + " Part of the photo could not be checked closely, so small windows "
+                         "may be missing. Count again, or check the floors.").strip()
+    res.floors_check = any(r["floors_check"] for r in sel) or bool(getattr(detect_sam3, "failed_tiles", 0))
     res.note = " ".join(r["note"] for r in sel if r["note"])
     res.floors = price(boxes, 0, base, mult, selected=set(res.selected))
     return res
 
 
-def run_area(img: Image.Image, boxes: list[Box], area, base=BASE_PRICE, mult=MULTIPLIER) -> SideResult:
+def run_area(img: Image.Image, boxes: list[Box], area, base=BASE_PRICE, mult=MULTIPLIER, floors="ai") -> SideResult:
     """The viewer drew the exact area to count (e.g. one wall of a corner shot). Reuse the windows already
     found, count only those whose centre is inside the area, and work out floors for just them."""
     x0, y0, x1, y1 = [float(v) for v in area]
@@ -1321,14 +1124,19 @@ def run_area(img: Image.Image, boxes: list[Box], area, base=BASE_PRICE, mult=MUL
         b.region, b.edge, b.other_side = 1, False, False
     for b in outside:
         b.region = 2
+    start_budget()
     res = SideResult("area", boxes)
     n, seen, note = 0, None, ""
+    live = [b for b in inside if b.counted]
     try:
-        n, seen = floors_for_wall(img, inside) if inside else (0, None)
+        if floors != "ai":
+            n = assign_floors_rows(live) if live else 0
+        else:
+            n, seen = floors_for_wall(img, inside) if inside else (0, None)
     except Exception as e:
-        live = [b for b in inside if b.counted]
         n = assign_floors_rows(live) if live else 0
-        note = "Used geometric floors."
+        note = f"Floors from geometry only (the AI check was unavailable: {str(e)[:60]})."
+    _floor_the_rest(inside)
     rect = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     reg = {"id": 1, "label": "Your area", "polygon": rect, "boxes": inside, "windows": sum(1 for b in inside if b.counted),
            "n_floors": n, "floors_check": bool(seen and n and seen < n), "note": note}

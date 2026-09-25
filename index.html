@@ -206,6 +206,10 @@
   .how div { background: var(--sunk); border-radius: 12px; padding: 14px; font-size: 13.5px; color: var(--muted); }
   .how b { display: block; color: var(--ink); margin-bottom: 3px; }
 
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  canvas:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .codebox { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  .codebox label { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); }
   .toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--ground);
            padding: 9px 16px; border-radius: 10px; font-size: 13.5px; z-index: 50; }
 
@@ -307,15 +311,21 @@
     <div class="run">
       <button class="btn" id="go" type="button" disabled>Count windows and price it</button>
       <div class="msg" id="msg" role="status">Add a photo of at least one side.</div>
+      <form class="codebox" id="codebox" hidden>
+        <label for="code">This app needs the access code you were given.</label>
+        <input class="input" id="code" type="password" autocomplete="current-password">
+        <button class="btn" type="submit">Save</button>
+      </form>
     </div>
   </aside>
 
   <!-- ================= workspace ================= -->
-  <section class="work" id="work" aria-live="polite"></section>
+  <section class="work" id="work"></section>
 </main>
 
 <div class="printsheet" id="printsheet"></div>
-<div class="toast" id="toast" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="sr-only" id="sr" aria-live="polite"></div>
 
 <script>
 const SIDES = ["Front", "Back", "Left", "Right"];
@@ -338,7 +348,7 @@ const S = {
   tab: null,
 };
 const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = v => "$" + (+v).toLocaleString("en-US", { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
 const base = () => Math.max(0, parseFloat($("base").value) || 0);
 const mult = () => Math.max(1, parseFloat($("mult").value) || 1);
@@ -419,6 +429,19 @@ function renderStairs() {
     <div class="stair"><b class="num">${money(v)}</b><i style="height:${Math.max(4, v / max * 58)}px;background:${colour(i + 1)}"></i><span>Floor ${i + 1}</span></div>`).join("");
 }
 
+/* ================= access code (only if the server asks for one) ================= */
+function accessCode() { try { return localStorage.getItem("wq-code") || ""; } catch { return ""; } }
+function apiHeaders() { return { "Content-Type": "application/json", "X-Access-Code": accessCode() }; }
+function askForCode() {
+  const f = $("codebox"); f.hidden = false; $("code").focus();
+  setMsg("Enter the access code, then press Count again.", true);
+}
+$("codebox").addEventListener("submit", e => {
+  e.preventDefault();
+  try { localStorage.setItem("wq-code", $("code").value.trim()); } catch {}
+  $("codebox").hidden = true; setMsg("Saved. Press Count to try again."); $("go").focus();
+});
+
 /* ================= run ================= */
 async function run() {
   const sides = SIDES.filter(s => S.photos[s]);
@@ -428,16 +451,18 @@ async function run() {
   const t0 = performance.now();
   const opts = { thresh: +$("thresh").value, floors: $("floorsMode").value };
   const out = {};
+  let needCode = false;
   await Promise.all(sides.map(async s => {              // every side runs at the same time
     try {
-      const r = await fetch("api/count", { method: "POST", headers: { "Content-Type": "application/json" },
+      const r = await fetch("api/count", { method: "POST", headers: apiHeaders(),
                                           body: JSON.stringify({ image: S.photos[s], ...opts }) });
       const j = await r.json().catch(() => ({ error: `the server answered ${r.status}` }));
+      if (r.status === 401) { needCode = true; throw new Error("needs the access code"); }
       if (!r.ok || j.error) throw new Error(j.error || `the server answered ${r.status}`);
       const img = new Image(); img.src = S.photos[s]; await img.decode();
       out[s] = sideState(j, img);
       S.running[s] = "ok";
-    } catch (e) { S.running[s] = "err:" + e.message; }
+    } catch (e) { S.running[s] = "err:" + e.message; S.lastErr = e.message; }
     renderWork();
   }));
   const failed = sides.filter(s => S.running[s].startsWith("err"));
@@ -445,10 +470,11 @@ async function run() {
   if (Object.keys(out).length) {
     const ordered = Object.fromEntries(SIDES.filter(s => out[s]).map(s => [s, out[s]]));  // Front, Back, Left, Right
     S.quote = { name: $("bname").value, sides: ordered, seconds: (performance.now() - t0) / 1000, example: false };
-    S.tab = Object.keys(out)[0];
+    S.tab = Object.keys(ordered)[0];
   }
   refreshRun();
-  if (failed.length) setMsg(`Couldn't count ${failed.join(", ")}. Try again, or retake that photo straight on.`, true);
+  if (needCode) { renderWork(); askForCode(); return; }
+  if (failed.length) setMsg(`Couldn't count ${failed.join(", ")}: ${S.lastErr || "try again"}.`, true);
   else setMsg(`Done in ${S.quote.seconds.toFixed(1)}s. Check the flagged floors, then send.`);
   renderWork();
 }
@@ -460,10 +486,8 @@ const edgeSet = r => new Set(r.boxes.map((b, i) => skipped(b) ? i : -1).filter(i
 // Everything the viewer can change on one side: which boxes count, which floor each box is on, per-floor
 // +/- adjustments, and how many floors there are.
 const sideState = (res, img, orig) => {
-  const q = { res, img, orig: orig || null, removed: edgeSet(res), adjust: {}, fl: res.boxes.map(b => b.floor),
-              sel: res.regions ? new Set(res.selected || []) : null, touched: false, nf: res.n_floors };
-  q.nf = selFloors(q);
-  return q;
+  return { res, img, orig: orig || null, removed: edgeSet(res), adjust: {}, fl: res.boxes.map(b => b.floor),
+           sel: res.regions ? new Set(res.selected || []) : null, touched: false, added: 0, kb: null };
 };
 // Is window i in a building / wall the viewer is quoting?
 const inSel = (q, i) => !q.sel || q.sel.has(q.res.boxes[i].region);
@@ -473,6 +497,8 @@ function selFloors(q) {
   q.res.boxes.forEach((b, i) => { if (inSel(q, i)) m = Math.max(m, q.fl[i]); });
   return Math.max(1, m);
 }
+// Floors shown: the chosen buildings' floors plus any the viewer added on top
+const nfOf = q => selFloors(q) + q.added;
 // Regions worth offering: the ones with at least one window we would count
 const pickable = q => (q.res.regions || []).filter(r => r.windows > 0 && r.polygon && r.polygon.length >= 3);
 const needsPick = q => pickable(q).length >= 2 && !q.touched;
@@ -482,7 +508,7 @@ const sideFloorsCheck = q => q.res.regions ? q.res.regions.some(r => (!q.sel || 
 /* ================= quote maths (all in the browser, so it's instant) ================= */
 function floorsOf(side) {
   const q = S.quote.sides[side], lines = [];
-  for (let f = 1; f <= q.nf; f++) {
+  for (let f = 1, nf = nfOf(q); f <= nf; f++) {
     const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === f && inSel(q, i));
     const kept = idx.filter(i => !q.removed.has(i));
     const adj = q.adjust[f] || 0;
@@ -496,7 +522,7 @@ function floorsOf(side) {
 function sideEdited(side) {
   const q = S.quote.sides[side], r = q.res;
   const selChanged = q.sel && (q.sel.size !== (r.selected || []).length || (r.selected || []).some(id => !q.sel.has(id)));
-  return !!q.orig || selChanged || Object.values(q.adjust).some(v => v) ||
+  return q.added > 0 || selChanged || Object.values(q.adjust).some(v => v) ||
          r.boxes.some((b, i) => q.fl[i] !== b.floor || q.removed.has(i) !== skipped(b));
 }
 // Things to check on a side: floors holding an unsure box, plus one if the floor split itself is doubtful
@@ -577,6 +603,11 @@ function draw(canvas, side) {
     g.fillStyle = L.col; g.fillRect(lx, ty, tw + 10, fs + 12);
     g.fillStyle = "#fff"; g.fillText(label, lx + 5, ty + 6);
   }
+  if (q.kb != null && inSel(q, q.kb)) {  // keyboard focus ring
+    const b = r.boxes[q.kb];
+    g.lineWidth = lw * 3; g.strokeStyle = "#fff"; g.strokeRect(b.x0 * k - lw * 2, b.y0 * k - lw * 2, (b.x1 - b.x0) * k + lw * 4, (b.y1 - b.y0) * k + lw * 4);
+    g.lineWidth = lw * 1.5; g.strokeStyle = "#08142D"; g.strokeRect(b.x0 * k - lw * 2, b.y0 * k - lw * 2, (b.x1 - b.x0) * k + lw * 4, (b.y1 - b.y0) * k + lw * 4);
+  }
   if (regs.length >= 2) {  // number badges last, so nothing covers them
     const bf = Math.round(fs * 1.25);
     g.font = `700 ${bf}px Poppins, "Segoe UI", sans-serif`;
@@ -593,8 +624,9 @@ function draw(canvas, side) {
 }
 
 // Click a box on the photo: a small menu to move that window to another floor, or stop counting it.
-// Smallest box under the pointer wins.
+// Smallest box under the pointer wins. Not on a counted window: toggles the building under the pointer.
 function onCanvasClick(e, side) {
+  if (S.skipClick) { S.skipClick = false; return; }  // the click that ends a drag is not a tap
   const cv = e.currentTarget, rect = cv.getBoundingClientRect(), q = S.quote.sides[side], r = q.res;
   const x = (e.clientX - rect.left) / rect.width * r.width, y = (e.clientY - rect.top) / rect.height * r.height;
   let best = -1, area = Infinity;
@@ -603,39 +635,76 @@ function onCanvasClick(e, side) {
     if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) { const a = (b.x1 - b.x0) * (b.y1 - b.y0); if (a < area) { area = a; best = i; } }
   });
   closeMenu();
-  if (best < 0) {  // not on a counted window: did they tap a building?
+  if (best < 0) {
     const hit = pickable(q).filter(R => inPoly(x, y, R.polygon)).sort((a, b) => polyArea(a.polygon) - polyArea(b.polygon))[0];
     if (hit && pickable(q).length >= 2) toggleRegion(side, hit.id);
     return;
   }
-  const counted = !q.removed.has(best), cur = q.fl[best];
+  openBoxMenu(side, best, e.clientX, e.clientY);
+}
+
+function openBoxMenu(side, best, clientX, clientY) {
+  const q = S.quote.sides[side], cv = $("cv");
+  const counted = !q.removed.has(best), cur = q.fl[best], nf = nfOf(q);
   const m = document.createElement("div");
   m.className = "boxmenu"; m.id = "boxmenu"; m.setAttribute("role", "dialog"); m.setAttribute("aria-label", "Change this window");
   m.innerHTML = `<div class="bm-h">This window</div>
     <div class="bm-lbl">Floor</div>
-    <div class="bm-floors">${Array.from({ length: q.nf }, (_, k) => k + 1).map(f =>
-      `<button type="button" data-f="${f}" class="${f === cur ? "on" : ""}" style="--c:${colour(f)}">${f}</button>`).join("")}
-      <button type="button" data-f="${q.nf + 1}" title="A new floor above floor ${q.nf}">+ new</button></div>
+    <div class="bm-floors">${Array.from({ length: nf }, (_, k) => k + 1).map(f =>
+      `<button type="button" data-f="${f}" class="${f === cur ? "on" : ""}" style="--c:${colour(f)}" aria-label="Floor ${f}">${f}</button>`).join("")}
+      <button type="button" data-f="${nf + 1}" title="A new floor above floor ${nf}">+ new</button></div>
     <button type="button" class="bm-count">${counted ? "Don't count this" : "Count this window"}</button>`;
   const wrap = cv.parentElement, wr = wrap.getBoundingClientRect();
-  m.style.left = Math.max(4, Math.min(e.clientX - wr.left, wr.width - 210)) + "px";
-  m.style.top = Math.max(4, Math.min(e.clientY - wr.top + 10, wr.height - 150)) + "px";
+  m.style.left = Math.max(4, Math.min(clientX - wr.left, wr.width - 210)) + "px";
+  m.style.top = Math.max(4, Math.min(clientY - wr.top + 10, wr.height - 150)) + "px";
   wrap.appendChild(m);
   m.querySelectorAll(".bm-floors button").forEach(btn => btn.addEventListener("click", ev => {
     ev.stopPropagation();
-    const f = +btn.dataset.f;
-    q.fl[best] = f; if (f > q.nf) q.nf = f;
-    q.removed.delete(best);
-    closeMenu(); renderWork(); toast(`Moved to floor ${f}`);
+    const f = +btn.dataset.f, before = nfOf(q);
+    q.fl[best] = f; q.removed.delete(best);
+    q.added = Math.max(0, Math.max(before, f) - selFloors(q));
+    closeMenu(true); renderWork(); toast(`Moved to floor ${f}`);
   }));
   m.querySelector(".bm-count").addEventListener("click", ev => {
     ev.stopPropagation();
     counted ? q.removed.add(best) : q.removed.delete(best);
-    closeMenu(); renderWork(); toast(counted ? "Not counted" : "Counted");
+    closeMenu(true); renderWork(); toast(counted ? "Not counted" : "Counted");
   });
-  m.querySelector("button").focus();
+  m.addEventListener("keydown", ev => {  // keep Tab inside the menu; Escape returns to the photo
+    if (ev.key === "Escape") { ev.stopPropagation(); closeMenu(true); return; }
+    if (ev.key !== "Tab") return;
+    const items = [...m.querySelectorAll("button")], i = items.indexOf(document.activeElement);
+    const next = ev.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i === items.length - 1 ? 0 : i + 1);
+    ev.preventDefault(); items[next].focus();
+  });
+  (m.querySelector(".bm-floors button.on") || m.querySelector("button")).focus();
 }
-function closeMenu() { $("boxmenu")?.remove(); }
+
+// Keyboard route on the photo: arrows move between the windows being quoted, Enter opens the menu.
+function onCanvasKey(e, side) {
+  const q = S.quote.sides[side], r = q.res;
+  const order = r.boxes.map((b, i) => i).filter(i => inSel(q, i))
+    .sort((a, b) => (q.fl[b] - q.fl[a]) || (r.boxes[a].x0 - r.boxes[b].x0));  // top floor first, left to right
+  if (!order.length) return;
+  const at = order.indexOf(q.kb);
+  if (["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"].includes(e.key)) {
+    e.preventDefault();
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
+    q.kb = order[at < 0 ? 0 : (at + step + order.length) % order.length];
+    draw($("cv"), side);
+    const b = r.boxes[q.kb];
+    $("sr").textContent = `Window ${order.indexOf(q.kb) + 1} of ${order.length}, floor ${q.fl[q.kb]}, ${q.removed.has(q.kb) ? "not counted" : "counted"}. Enter to change it.`;
+  } else if ((e.key === "Enter" || e.key === " ") && q.kb != null && at >= 0) {
+    e.preventDefault();
+    const b = r.boxes[q.kb], cv = $("cv").getBoundingClientRect();
+    openBoxMenu(side, q.kb, cv.left + (b.x0 + b.x1) / 2 / r.width * cv.width, cv.top + (b.y0 + b.y1) / 2 / r.height * cv.height);
+  }
+}
+// Close the window menu. With refocus, keyboard focus returns to the photo (after any re-render).
+function closeMenu(refocus) {
+  const m = $("boxmenu"); if (!m) return; m.remove();
+  if (refocus) requestAnimationFrame(() => $("cv")?.focus());
+}
 function inPoly(x, y, poly) {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -648,7 +717,7 @@ const polyArea = p => Math.abs(p.reduce((a, [x, y], i) => { const [x2, y2] = p[(
 function toggleRegion(side, id) {
   const q = S.quote.sides[side];
   q.sel.has(id) ? q.sel.delete(id) : q.sel.add(id);
-  q.touched = true; q.nf = selFloors(q);
+  q.touched = true;
   const R = q.res.regions.find(r => r.id === id);
   renderWork(); toast(`${q.sel.has(id) ? "Counting" : "Not counting"} ${R ? R.label : "that building"}`);
 }
@@ -665,8 +734,10 @@ function startDrawArea(side) {
   const down = e => { start = pos(e); cv.setPointerCapture(e.pointerId); box.hidden = false; e.preventDefault(); };
   const move = e => { if (!start) return; const [x, y] = pos(e);
     Object.assign(box.style, { left: Math.min(x, start[0]) + "px", top: Math.min(y, start[1]) + "px", width: Math.abs(x - start[0]) + "px", height: Math.abs(y - start[1]) + "px" }); };
+  const cancel = () => { cleanup(); toast("Drawing cancelled"); };
   const up = async e => {
     if (!start) return;
+    S.skipClick = true;
     const [x, y] = pos(e), r = cv.getBoundingClientRect(), sx = q.res.width / r.width, sy = q.res.height / r.height;
     const area = [Math.min(x, start[0]) * sx, Math.min(y, start[1]) * sy, Math.max(x, start[0]) * sx, Math.max(y, start[1]) * sy];
     cleanup();
@@ -675,36 +746,48 @@ function startDrawArea(side) {
     try {
       const c = document.createElement("canvas"); c.width = q.img.naturalWidth; c.height = q.img.naturalHeight;
       c.getContext("2d").drawImage(q.img, 0, 0);
-      const resp = await fetch("api/count", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: c.toDataURL("image/jpeg", 0.9), area, boxes: q.res.boxes }) });
-      const j = await resp.json();
+      const resp = await fetch("api/count", { method: "POST", headers: apiHeaders(),
+        body: JSON.stringify({ image: c.toDataURL("image/jpeg", 0.9), area, boxes: q.res.boxes, floors: $("floorsMode").value }) });
+      const j = await resp.json().catch(() => ({ error: `the server answered ${resp.status}` }));
+      if (resp.status === 401) { askForCode(); throw new Error("it needs the access code"); }
       if (!resp.ok || j.error) throw new Error(j.error || resp.status);
       S.quote.sides[side] = sideState(j, q.img, q.orig || q.res);
       toast("Counting only the area you drew");
-    } catch (err) { toast("Couldn't count that area. Try again."); }
+    } catch (err) { toast(`Couldn't count that area: ${err.message}`); }
     hint.remove(); renderWork();
   };
   function cleanup() { cv.removeEventListener("pointerdown", down); cv.removeEventListener("pointermove", move); cv.removeEventListener("pointerup", up);
+    cv.removeEventListener("pointercancel", cancel);
     box.remove(); hint.remove(); cv.style.cursor = ""; cv.style.touchAction = ""; S.drawing = null; }
   S.drawing = cleanup;
   cv.addEventListener("pointerdown", down); cv.addEventListener("pointermove", move); cv.addEventListener("pointerup", up);
+  cv.addEventListener("pointercancel", cancel);
 }
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
+document.addEventListener("keydown", e => { if (e.key !== "Escape") return; if (S.drawing) { S.drawing(); toast("Drawing cancelled"); } closeMenu(); });
 document.addEventListener("click", e => { if (!e.target.closest("#boxmenu") && e.target.id !== "cv") closeMenu(); });
 
 // Merge floor f into the floor below it: its windows move down, and every floor above shifts down one.
 function mergeDown(side, f) {
-  const q = S.quote.sides[side];
-  q.fl = q.fl.map(v => v >= f ? v - 1 : v);
+  const q = S.quote.sides[side], before = nfOf(q);
+  q.fl = q.fl.map((v, i) => inSel(q, i) && v >= f ? v - 1 : v);  // only the buildings being quoted
   const adj = {};
   for (const [k, v] of Object.entries(q.adjust)) { const n = +k; const t = n >= f ? n - 1 : n; adj[t] = (adj[t] || 0) + v; }
-  q.adjust = adj; q.nf = Math.max(1, q.nf - 1);
+  q.adjust = adj; q.added = Math.max(0, before - 1 - selFloors(q));
 }
 
 /* ================= workspace ================= */
 function renderWork() {
+  if (S.drawing) S.drawing();  // a re-render replaces the photo; never leave a half-drawn area behind
+  const fk = S.refocus || document.activeElement?.dataset?.fk;
+  S.refocus = null;
   renderStairs();
   const w = $("work");
+  try { renderWorkInner(w); } finally {
+    if (fk) document.querySelector(`[data-fk="${CSS.escape(fk)}"]`)?.focus();
+  }
+}
+
+function renderWorkInner(w) {
   if (S.running) {
     w.innerHTML = `<div class="panel progress">
       <h2 style="margin:0;font:28px/1 var(--display);letter-spacing:.4px">Counting windows</h2>
@@ -744,12 +827,19 @@ function renderWork() {
         <span>counted in <b class="num">${q.seconds.toFixed(1)}s</b></span>
       </div>
       <div class="tabs" role="tablist">
-        ${tabs.map(t => `<button class="tab ${t === S.tab ? "on" : ""}" role="tab" aria-selected="${t === S.tab}" data-t="${t}">
+        ${tabs.map(t => `<button class="tab ${t === S.tab ? "on" : ""}" role="tab" id="tab-${t}" aria-controls="tabbody" tabindex="${t === S.tab ? 0 : -1}" aria-selected="${t === S.tab}" data-t="${t}" data-fk="tab-${t}">
           ${t === "Summary" ? "Summary" : `${t}<span class="amt num">${money(sideTotal(t))}</span>${sideChecks(t) ? '<span class="wdot" title="Has something to check"></span>' : ""}`}</button>`).join("")}
       </div>
-      <div id="tabbody"></div>
+      <div id="tabbody" role="tabpanel" aria-labelledby="tab-${S.tab}"></div>
     </div>`;
-  w.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => { S.tab = b.dataset.t; renderWork(); }));
+  w.querySelectorAll(".tab").forEach(b => {
+    b.addEventListener("click", () => { S.tab = b.dataset.t; renderWork(); });
+    b.addEventListener("keydown", e => {  // arrow keys move between tabs
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      const i = tabs.indexOf(S.tab), n = tabs.length;
+      S.tab = tabs[(i + (e.key === "ArrowRight" ? 1 : -1) + n) % n]; S.refocus = `tab-${S.tab}`; renderWork();
+    });
+  });
   S.tab === "Summary" ? renderSummary() : renderSide(S.tab);
 }
 
@@ -759,11 +849,11 @@ function renderSide(side) {
     <div class="sidegrid">
       <div class="viewer">
         ${pickBar(side)}
-        <div class="canvaswrap"><canvas id="cv" role="img" aria-label="${side} photo with each window boxed and coloured by floor"></canvas></div>
+        <div class="canvaswrap"><canvas id="cv" tabindex="0" data-fk="cv" role="img" aria-label="${side} photo with each window boxed and coloured by floor. Use the arrow keys to move between windows and Enter to change one."></canvas></div>
         <div class="legend">
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
           <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
-          <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (another side, next door, too unsure, or removed)</span>
+          <span><i style="border-color:#fff;border-style:dashed;background:#5A6480"></i>✕ Not counted (another side, next door, too unsure, or removed)</span>
           <span>Click a window to move it to another floor or stop counting it. Click a building to count it or not.</span>
         </div>
       </div>
@@ -773,15 +863,15 @@ function renderSide(side) {
           <div class="frow">
             <span class="sw" style="background:${colour(f.floor)}"></span>
             <div><div class="nm">Floor ${f.floor} ${f.check ? '<span class="pill warn">check</span>' : ""}</div>
-              <div class="sub num">${money(f.each)} each${f.windows !== f.detected ? ` · ${f.detected} boxed` : ""}${f.floor > 1 ? ` · <button class="mini" type="button" data-merge="${f.floor}" title="Floor ${f.floor} is really part of floor ${f.floor - 1}">merge ↓</button>` : ""}</div></div>
-            <div class="step"><button type="button" data-f="${f.floor}" data-d="-1" aria-label="One fewer window on floor ${f.floor}">−</button>
+              <div class="sub num">${money(f.each)} each${f.windows !== f.detected ? ` · ${f.detected} boxed` : ""}${f.floor > 1 ? ` · <button class="mini" type="button" data-merge="${f.floor}" data-fk="merge-${f.floor}" title="Floor ${f.floor} is really part of floor ${f.floor - 1}">merge ↓</button>` : ""}</div></div>
+            <div class="step"><button type="button" data-f="${f.floor}" data-d="-1" data-fk="step-${f.floor}--1" aria-label="One fewer window on floor ${f.floor}">−</button>
               <output class="num">${f.windows}</output>
-              <button type="button" data-f="${f.floor}" data-d="1" aria-label="One more window on floor ${f.floor}">+</button></div>
+              <button type="button" data-f="${f.floor}" data-d="1" data-fk="step-${f.floor}-1" aria-label="One more window on floor ${f.floor}">+</button></div>
             <div class="amt num">${money(f.subtotal)}</div>
           </div>`).join("")}</div>
         <div class="row" style="display:flex;gap:16px;flex-wrap:wrap">
-          <button class="linkbtn" id="addfloor" type="button">+ Add a floor on top</button>
-          <button class="linkbtn" id="addbelow" type="button" title="The ground floor was missed: everything moves up one floor">+ Add a floor below</button>
+          <button class="linkbtn" id="addfloor" data-fk="addfloor" type="button">+ Add a floor on top</button>
+          <button class="linkbtn" id="addbelow" data-fk="addbelow" type="button" title="The ground floor was missed: everything moves up one floor">+ Add a floor below</button>
         </div>
         <div class="fsum"><span>${sideWindows(side)} windows</span><b class="num">${money(sideTotal(side))}</b></div>
         ${sideNote(q) ? `<div class="hint ${sideFloorsCheck(q) && !sideEdited(side) ? "warn" : ""}">${esc(sideNote(q))}</div>` : ""}
@@ -789,28 +879,30 @@ function renderSide(side) {
         ${sideEdited(side) ? `<button class="linkbtn" id="undo" type="button">Undo my changes on this side</button>` : ""}
       </div>
     </div>`;
-  const cv = $("cv"); draw(cv, side); cv.addEventListener("click", e => { if (!S.drawing) onCanvasClick(e, side); });
+  const cv = $("cv"); draw(cv, side);
+  cv.addEventListener("click", e => { if (!S.drawing) onCanvasClick(e, side); });
+  cv.addEventListener("keydown", e => { if (!S.drawing) onCanvasKey(e, side); });
   $("tabbody").querySelectorAll("[data-region]").forEach(b => b.addEventListener("click", () => toggleRegion(side, +b.dataset.region)));
-  $("drawarea")?.addEventListener("click", () => startDrawArea(side));
+  $("drawarea")?.addEventListener("click", () => { if (S.drawing) { S.drawing(); return; } startDrawArea(side); });
   $("backregions")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.orig, q.img); renderWork(); toast("Back to the buildings found in the photo"); });
   $("tabbody").querySelectorAll(".step button").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.f, d = +b.dataset.d, line = floorsOf(side).find(l => l.floor === f);
     if (d < 0 && line.windows === 0) return;
     q.adjust[f] = (q.adjust[f] || 0) + d; renderWork();
   }));
-  $("addfloor").addEventListener("click", () => { q.nf++; q.adjust[q.nf] = 1; renderWork(); });
+  $("addfloor").addEventListener("click", () => { q.added++; q.adjust[nfOf(q)] = 1; renderWork(); });
   // A missed ground floor: every window moves up one floor (and one price step), and a new floor 1 starts
   // at one window for the viewer to set with + and -.
   $("addbelow").addEventListener("click", () => {
-    q.fl = q.fl.map(v => v + 1);
+    q.fl = q.fl.map((v, i) => inSel(q, i) ? v + 1 : v);  // only the buildings being quoted
     const adj = { 1: 1 };
     for (const [k, v] of Object.entries(q.adjust)) adj[+k + 1] = v;
-    q.adjust = adj; q.nf++; renderWork(); toast("Added a ground floor. Everything above moved up one.");
+    q.adjust = adj; renderWork(); toast("Added a ground floor. Everything above moved up one.");
   });
   $("tabbody").querySelectorAll("[data-merge]").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.merge; mergeDown(side, f); renderWork(); toast(`Floor ${f} merged into floor ${f - 1}`);
   }));
-  $("undo")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.orig || q.res, q.img); renderWork(); toast("Back to the detected counts"); });
+  $("undo")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.res, q.img, q.orig); renderWork(); toast("Back to the detected counts"); });
 }
 
 // Above the photo: which buildings / walls this side's quote covers, and the draw-your-own-area tool.
@@ -820,7 +912,7 @@ function pickBar(side) {
       <span class="pickacts"><button class="chip" id="drawarea" type="button">Draw again</button>
       <button class="chip" id="backregions" type="button">Back to buildings</button></span></div>`;
   const chips = regs.length >= 2 ? regs.map(R => `<button class="chip ${q.sel.has(R.id) ? "on" : ""}" type="button" data-region="${R.id}"
-      aria-pressed="${q.sel.has(R.id)}">${q.sel.has(R.id) ? "✓ " : ""}${R.id} · ${esc(R.label)} · ${R.windows}</button>`).join("") : "";
+      aria-pressed="${q.sel.has(R.id)}" data-fk="reg-${R.id}">${q.sel.has(R.id) ? "✓ " : ""}${R.id} · ${esc(R.label)} · ${R.windows}</button>`).join("") : "";
   const ask = regs.length >= 2 ? (q.touched ? "<b>Counting:</b>" : `<b>This photo shows ${regs.length} buildings or walls.</b> Tap the ones you're quoting, on the photo or here:`) : "";
   return `<div class="pickbar ${needsPick(q) ? "ask" : ""}">
       ${ask ? `<span>${ask}</span><span class="chips">${chips}</span>` : `<span class="muted">Counting the whole building.</span>`}
@@ -853,6 +945,14 @@ function quoteText() {
     "", `Total: ${quoteWindows()} windows, ${money(quoteTotal())}`].join("\n");
 }
 
+function fillPrintSheet() {
+  if (!S.quote) { $("printsheet").innerHTML = ""; return; }
+  $("printsheet").innerHTML = `<h1>Window cleaning quote</h1>
+    <p><b>${esc(S.quote.name || "Untitled building")}</b><br>${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</p>
+    ${summaryTable(summaryRows())}<p class="big">${money(quoteTotal())}</p>`;
+}
+window.addEventListener("beforeprint", fillPrintSheet);  // Ctrl+P as well as the button
+
 function renderSummary() {
   const data = summaryRows();
   $("tabbody").innerHTML = `<div class="summary">
@@ -862,20 +962,16 @@ function renderSummary() {
       <button class="btn ghost" id="copy" type="button">Copy as text</button>
       <button class="btn ghost" id="csv" type="button">Download CSV</button>
     </div></div>`;
-  $("print").addEventListener("click", () => {
-    $("printsheet").innerHTML = `<h1>Window cleaning quote</h1>
-      <p><b>${esc(S.quote.name || "Untitled building")}</b><br>${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</p>
-      ${summaryTable(data)}<p class="big">${money(quoteTotal())}</p>`;
-    window.print();
-  });
+  $("print").addEventListener("click", () => { fillPrintSheet(); window.print(); });
   $("copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(quoteText()); toast("Quote copied"); }
     catch { toast("Couldn't reach the clipboard. Use the CSV instead."); }
   });
   $("csv").addEventListener("click", () => {
     const { sides, rows } = data;
-    const L = [["Floor", "Per window", ...sides, "Windows", "Subtotal"], ...rows.map(r => [r.floor, r.each, ...r.per, r.windows, r.subtotal]),
-               ["Total", "", ...sides.map(sideWindows), quoteWindows(), quoteTotal()]];
+    const r2 = v => Number.isInteger(v) ? v : v.toFixed(2);  // money to the cent
+    const L = [["Floor", "Per window", ...sides, "Windows", "Subtotal"], ...rows.map(r => [r.floor, r2(r.each), ...r.per, r.windows, r2(r.subtotal)]),
+               ["Total", "", ...sides.map(sideWindows), quoteWindows(), r2(quoteTotal())]];
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([L.map(l => l.join(",")).join("\n")], { type: "text/csv" }));
     a.download = ((S.quote.name || "window-quote").replace(/[^\w-]+/g, "-")) + ".csv"; a.click();

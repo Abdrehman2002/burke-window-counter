@@ -1,5 +1,25 @@
 # Window Quote: audit (2026-09-26)
 
+## Status: every code-review item is fixed (2026-09-26)
+
+Each fix was tested: backend edge cases called directly, UI flows in a real browser (22 checks, all
+passing), accuracy re-scored with `eval.py` (89%, unchanged).
+
+| Area | Fixed |
+|---|---|
+| Security / cost | Access code (`ACCESS_CODE` env var; the page asks once and remembers it). Best-effort rate limit. Sensitivity clamped 0.2–0.8. AI storey check only for the 3 biggest buildings. At most 400 windows. Area mode validated and honours "geometry only". Images over 40 MP refused and shrunk before rotating. The key-listing GET removed. `esc()` escapes apostrophes. The dev server binds to localhost and never serves `.env` or source. `.env` is kept out of Vercel uploads. |
+| Reliability | One 50 s budget per request. Outside calls get connect 5 s / read ≤20 s (Roboflow) and ≤40 s (OpenAI) timeouts inside it, Roboflow gets 2 tries, and Gemini is skipped late in the budget. A failed tile is noted and the side flagged. `VOTES` is at least 1. |
+| Correctness | Every window has a floor, including in fallback paths, so a click-in is always priced. An empty drawn area never re-runs detection. Floor edits touch only the selected buildings. Added floors survive selecting buildings. Draw mode can't get stuck, Escape cancels it, and the drag's ending click is ignored. One bad AI answer no longer discards the other votes. The fallback note says why. The first tab is Front. Undo keeps a drawn area. CSV rounded to cents. |
+| Performance | `_merge_stacked` is a single sweep. Building-mask distances are computed once. |
+| Maintainability | About 280 lines of dead floor code deleted. The broken Streamlit app removed. README and API docstring rewritten. |
+| Accessibility | Workspace no longer an `aria-live` region; toast and a screen-reader line are. Arrow keys move between windows on the photo and Enter opens the menu. Tab stays in the menu and Escape returns focus. Focus kept after +/−, merge and tab changes. Proper tab pattern with arrow keys. Ctrl+P prints the quote. Legend matches the drawing. |
+
+**Still open** (not code-review items): the product and accuracy work in P1/P2 below. Drawing an area
+with the keyboard alone isn't possible, but the building chips cover the same need.
+
+**To do on Vercel:** set **`ACCESS_CODE`** in Project → Settings → Environment Variables, then redeploy.
+Until then the API stays open.
+
 Where it stands, what's wrong, and what to do next, ranked. Every number comes from a measured run:
 `eval.py` (hand counts on 7 buildings), `test_batch.py` (25 photos), live calls to Vercel, and an
 independent read of the code.

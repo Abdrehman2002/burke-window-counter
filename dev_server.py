@@ -16,6 +16,8 @@ ALLOWED = ("/", "/index.html", "/favicon.ico")
 
 
 class Dev(http.server.SimpleHTTPRequestHandler):
+    _send = ApiHandler._send  # the API handler's JSON reply helper
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=ROOT, **kw)
 
