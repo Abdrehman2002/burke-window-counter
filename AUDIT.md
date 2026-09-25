@@ -76,6 +76,21 @@ boarded openings, side walls) are "what counts as a window" judgments. A general
 those from prompts. **A step change needs a detector trained on labelled facades under Burke's own
 counting rules** (see #4 below).
 
+## Commercial test (2026-09-26): 18 US commercial buildings
+
+Run through the full pipeline; results in `commercial-photos/results/` and `_results.txt`. **It's not
+ready for commercial quotes.** Roughly 5 of 18 are usable as-is (Cheese Store upper floor, medical
+office, Harmony Hills school, Seneca 506 upper floor, Fredrich upper floor).
+
+| # | Failure | Where | Cause (measured) | Fix |
+|---|---|---|---|---|
+| C1 | **Shop-window glass not counted** | c01a, c05b, c06a, c06b, c09a, c09b, c12 | SAM 3 scores storefront glass 0.41–0.54, so it lands under the 0.5 "counted" line, or it's 8× a typical window and the size filter drops it (15 boxes on the Cheese Store) | Treat storefront glass as its own type: keep large ground-floor glass (no 8× drop), price it per Burke's rule (pane, or per sq ft) |
+| C2 | **Floors wrong on corner shots and tall buildings** | c07b hotel (50 windows on "floor 3" zig-zagging), c11 Doubletree (3 floors, should be ~16), c01b, c12, c09a | Two walls in one photo (the corner split didn't fire), so row-matching pairs windows across the corner; on the tower, steep perspective plus 389 overlapping boxes | Stronger corner split (the building outline's corner line); floors per wall; with 12+ floors, count floors by stepping up one column |
+| C3 | **Glass curtain walls: 0 windows** | c03b (0), c03a (few), c08b | Reflective glass isn't "window" at 0.4 (57 candidates exist at 0.2); a curtain wall is panels, not windows | Curtain-wall mode: count panels (mullion grid) or price by area, per Burke |
+| C4 | **Building too small in the frame: 0 windows** | c04a strip mall (far shot) | Zero detections even at 0.2; the storefront is a thin strip | "Stand closer" guidance, or auto-zoom on the building outline and detect again |
+| C5 | **Divided-lite and transom panes counted as separate windows** | c05b transom row counted as 20 | Each pane detected | Depends on Burke's pane-vs-window answer; merge panes in one frame if he says "per window" |
+| C6 | **Default building pick is sometimes wrong** | c06a picked a 4-window strip, not the main building | Default = most windows | Default = the building nearest the photo centre and largest in area |
+
 ## P1: accuracy (the product is only as good as this)
 
 Ranked by how much they move the count per hour of work:
