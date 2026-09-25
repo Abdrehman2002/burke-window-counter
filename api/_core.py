@@ -86,17 +86,32 @@ def _sam3_boxes(pred_list) -> list[Box]:
     return boxes
 
 
+def _roboflow_post(payload: dict, tries=3) -> dict:
+    """POST to Roboflow's hosted SAM 3, retrying server errors and timeouts (they happen now and then,
+    and with 6 calls per photo one blip would otherwise sink the whole side)."""
+    last = None
+    for attempt in range(tries):
+        try:
+            r = requests.post("https://serverless.roboflow.com/sam3/concept_segment",
+                              headers={"Authorization": f"Bearer {os.environ['ROBOFLOW_API_KEY']}"},
+                              json=payload, timeout=60)
+            if r.status_code >= 500 or r.status_code == 429:
+                last = RuntimeError(f"Roboflow {r.status_code}")
+            else:
+                r.raise_for_status()
+                return r.json()
+        except requests.exceptions.RequestException as e:
+            last = e
+        time.sleep(0.8 * (attempt + 1))
+    raise RuntimeError(f"window detector unavailable after {tries} tries ({last})")
+
+
 def _sam3_call(img: Image.Image, thresh=0.4, prompt="window") -> list[Box]:
     """One SAM 3 request: windows, minus any whose centre sits on a car or vehicle."""
     prompts = [{"type": "text", "text": prompt}] + [{"type": "text", "text": t} for t in EXCLUDE_PROMPTS]
-    r = requests.post(
-        "https://serverless.roboflow.com/sam3/concept_segment",
-        headers={"Authorization": f"Bearer {os.environ['ROBOFLOW_API_KEY']}"},
-        json={"image": {"type": "base64", "value": _jpeg_b64(img)},
-              "prompts": prompts, "output_prob_thresh": thresh, "format": "polygon"},
-        timeout=120)
-    r.raise_for_status()
-    results = sorted(r.json()["prompt_results"], key=lambda x: x["prompt_index"])
+    data = _roboflow_post({"image": {"type": "base64", "value": _jpeg_b64(img)},
+                           "prompts": prompts, "output_prob_thresh": thresh, "format": "polygon"})
+    results = sorted(data["prompt_results"], key=lambda x: x["prompt_index"])
     windows = _sam3_boxes(results[0]["predictions"])
     blockers = [b for res in results[1:] for b in _sam3_boxes(res["predictions"])]
     def on_blocker(w: Box) -> bool:
@@ -141,8 +156,16 @@ def detect_sam3(img: Image.Image, thresh=0.4, prompt="window") -> list[Box]:
                 out.append(bx)
         return out
 
+    def safe(job):
+        try:
+            return run(job)
+        except Exception:
+            if job is None:  # the whole-photo pass is the backbone: if it fails, the side fails
+                raise
+            return []        # one tile failing costs a little recall, never the whole quote
+
     with ThreadPoolExecutor(len(jobs)) as ex:
-        parts = list(ex.map(run, jobs))
+        parts = list(ex.map(safe, jobs))
     return [b for p in parts for b in p]
 
 
@@ -784,15 +807,10 @@ def segment_buildings(img: Image.Image, thresh=0.4) -> list[list[list[float]]]:
     """SAM 3 'building' instances: one polygon (list of [x, y]) per separate building, biggest first.
     Near-duplicates are dropped. Walls of the SAME building are not split here (see _split_walls)."""
     prompts = [{"type": "text", "text": "building"}]
-    r = requests.post(
-        "https://serverless.roboflow.com/sam3/concept_segment",
-        headers={"Authorization": f"Bearer {os.environ['ROBOFLOW_API_KEY']}"},
-        json={"image": {"type": "base64", "value": _jpeg_b64(img)}, "prompts": prompts,
-              "output_prob_thresh": thresh, "format": "polygon"},
-        timeout=120)
-    r.raise_for_status()
+    data = _roboflow_post({"image": {"type": "base64", "value": _jpeg_b64(img)}, "prompts": prompts,
+                           "output_prob_thresh": thresh, "format": "polygon"})
     polys = []
-    for p in r.json()["prompt_results"][0]["predictions"]:
+    for p in data["prompt_results"][0]["predictions"]:
         rings = [m for m in p["masks"] if len(m) >= 3]
         if rings:
             polys.append(max(rings, key=lambda m: _poly_area(m)))
