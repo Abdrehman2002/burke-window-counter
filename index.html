@@ -58,6 +58,8 @@
   /* ---------- shell ---------- */
   .shell { max-width: 1440px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px; align-items: start; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+  .fielderr { font-size: 12px; color: var(--bad); margin-top: 5px; }
+  .input[aria-invalid="true"] { border-color: var(--bad); }
   .foldbar { display: none; width: 100%; border: 0; background: var(--panel); border-radius: 16px; padding: 14px 18px;
              text-align: left; justify-content: space-between; align-items: center; gap: 10px; min-height: 52px; font-size: 13.5px; }
   .foldbar b { color: var(--accent); font-weight: 600; white-space: nowrap; }
@@ -301,7 +303,8 @@
       <div class="two">
         <div>
           <label class="f" for="base">Floor 1 price</label>
-          <div class="prefix"><span>$</span><input class="input num" type="number" id="base" value="3" min="0" step="0.5"></div>
+          <div class="prefix"><span>$</span><input class="input num" type="number" id="base" value="3" min="0.01" step="0.5" aria-describedby="baseErr"></div>
+          <div class="fielderr" id="baseErr" role="alert" hidden></div>
         </div>
         <div>
           <label class="f" for="mult">Each floor up ×</label>
@@ -370,7 +373,9 @@ const S = {
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = v => "$" + (+v).toLocaleString("en-US", { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
-const base = () => Math.max(0, parseFloat($("base").value) || 0);
+// The first-floor price only changes to a valid amount; a blank or zero field never turns the quote into $0.
+S.base = 3;
+const base = () => S.base;
 const mult = () => Math.max(1, parseFloat($("mult").value) || 1);
 const rate = n => base() * Math.pow(mult(), n - 1);
 const colour = n => COLOURS[(n - 1) % COLOURS.length];
@@ -403,7 +408,7 @@ function buildSlots() {
       if (input.files[0]) { if ($("bname").dataset.auto) { $("bname").value = ""; delete $("bname").dataset.auto; } setPhoto(s, input.files[0]); }
       input.value = "";
     });
-    el.querySelector(".rm").addEventListener("click", () => setPhoto(s, null));
+    el.querySelector(".rm").addEventListener("click", () => removeSide(s));
     el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("drag"); });
     el.addEventListener("dragleave", () => el.classList.remove("drag"));
     el.addEventListener("drop", e => { e.preventDefault(); el.classList.remove("drag"); if (e.dataTransfer.files[0]) setPhoto(s, e.dataTransfer.files[0]); });
@@ -411,10 +416,12 @@ function buildSlots() {
   $("sample").innerHTML += SAMPLES.map(([n, f]) => `<option value="${f}">${esc(n)}</option>`).join("");
   $("sample").addEventListener("change", async e => {
     const f = e.target.value; if (!f) return;
+    const snap = snapshot(), hadWork = Object.keys(S.photos).length > 0 || hasRealQuote();
     for (const s of SIDES) await setPhoto(s, null, true);
     await setPhoto("Front", await (await fetch("photos/" + f)).blob());
     if (!$("bname").value || $("bname").dataset.auto) { $("bname").value = "Sample: " + SAMPLES.find(x => x[1] === f)[0]; $("bname").dataset.auto = "1"; }
     e.target.value = "";
+    if (hadWork) toast("Sample loaded in place of your photos", { label: "Undo", fn: () => { restore(snap); toast("Your photos are back"); } });
   });
   $("bname").addEventListener("input", () => { delete $("bname").dataset.auto; if (S.quote) { S.quote.name = $("bname").value; renderWork(); } });
 }
@@ -427,6 +434,21 @@ async function shrink(file) {
   c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", 0.9);
+}
+
+// Remove a side's photo. If that side is in the quote, it leaves the quote too (so the total never counts
+// a photo that isn't there), and one Undo puts both back.
+function removeSide(side) {
+  const snap = snapshot();
+  const inQuote = hasRealQuote() && S.quote.sides[side];
+  setPhoto(side, null);
+  if (inQuote) {
+    const rest = Object.fromEntries(Object.entries(S.quote.sides).filter(([k]) => k !== side));
+    S.quote = Object.keys(rest).length ? { ...S.quote, sides: rest } : null;
+    if (S.tab === side) S.tab = S.quote ? Object.keys(rest)[0] : null;
+    renderWork();
+    toast(`${side} removed from the quote`, { label: "Undo", fn: () => { restore(snap); toast(`${side} restored`); } });
+  }
 }
 
 async function setPhoto(side, file, quiet) {
@@ -443,6 +465,23 @@ async function setPhoto(side, file, quiet) {
   }
   if (!quiet) refreshRun();
 }
+
+// Everything a reset throws away: photos, the quote, the name, the open tab. Undo puts it all back.
+function snapshot() {
+  return { photos: { ...S.photos }, quote: S.quote, name: $("bname").value, tab: S.tab };
+}
+function showSlot(side, url) {
+  const el = $("slot-" + side);
+  el.querySelector("img")?.remove(); el.classList.remove("filled");
+  if (url) { const img = new Image(); img.src = url; img.alt = ""; el.prepend(img); el.classList.add("filled"); }
+}
+function restore(snap) {
+  S.photos = { ...snap.photos };
+  for (const s of SIDES) showSlot(s, S.photos[s]);
+  S.quote = snap.quote; S.tab = snap.tab; $("bname").value = snap.name;
+  refreshRun(); renderWork();
+}
+const hasRealQuote = () => S.quote && !S.quote.example;
 
 function setMsg(t, err) { $("msg").textContent = t; $("msg").classList.toggle("err", !!err); }
 function refreshRun() {
@@ -672,6 +711,11 @@ function draw(canvas, side) {
     g.fillStyle = L.col; g.fillRect(lx, ty, tw + 10 / Z, fs + 12 / Z);
     g.fillStyle = "#fff"; g.fillText(label, lx + 5 / Z, ty + 6 / Z);
   }
+  if (q.hover != null && inSel(q, q.hover) && q.hover !== q.kb) {  // pointer / finger highlight
+    const b = r.boxes[q.hover];
+    g.lineWidth = lw * 2.5; g.strokeStyle = "rgba(255,255,255,.95)";
+    g.strokeRect(b.x0 * k - lw * 1.5, b.y0 * k - lw * 1.5, (b.x1 - b.x0) * k + lw * 3, (b.y1 - b.y0) * k + lw * 3);
+  }
   if (q.kb != null && inSel(q, q.kb)) {  // keyboard focus ring
     const b = r.boxes[q.kb];
     g.lineWidth = lw * 3; g.strokeStyle = "#fff"; g.strokeRect(b.x0 * k - lw * 2, b.y0 * k - lw * 2, (b.x1 - b.x0) * k + lw * 4, (b.y1 - b.y0) * k + lw * 4);
@@ -706,10 +750,33 @@ function onCanvasClick(e, side) {
   closeMenu();
   if (best < 0) {
     const hit = pickable(q).filter(R => inPoly(x, y, R.polygon)).sort((a, b) => polyArea(a.polygon) - polyArea(b.polygon))[0];
-    if (hit && pickable(q).length >= 2) toggleRegion(side, hit.id);
+    if (!hit || pickable(q).length < 2) return;
+    // Tapping a dimmed building adds it. Tapping near a window on a counted building must never drop the
+    // whole building (a near-miss would silently cut the price), so that only happens from its chip.
+    if (!q.sel.has(hit.id)) toggleRegion(side, hit.id);
+    else toast(`To stop counting ${hit.label}, use its button above the photo.`);
     return;
   }
   openBoxMenu(side, best, e.clientX, e.clientY);
+}
+
+// The window under the pointer (or finger) gets a white outline, so "on it or just beside it?" is never a guess.
+function boxAt(side, clientX, clientY) {
+  const q = S.quote.sides[side], r = q.res, [x, y] = toPhoto(side, clientX, clientY);
+  let best = -1, area = Infinity;
+  r.boxes.forEach((b, i) => {
+    if (!inSel(q, i)) return;
+    if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) { const a = (b.x1 - b.x0) * (b.y1 - b.y0); if (a < area) { area = a; best = i; } }
+  });
+  return best;
+}
+function onCanvasHover(e, side) {
+  if (S.drawing) return;
+  const q = S.quote.sides[side], i = boxAt(side, e.clientX, e.clientY), cur = i >= 0 ? i : null;
+  $("cv").style.cursor = cur != null ? "pointer" : "";
+  if (cur === q.hover) return;
+  q.hover = cur;
+  if (!onCanvasHover.raf) onCanvasHover.raf = requestAnimationFrame(() => { onCanvasHover.raf = 0; if ($("cv")) draw($("cv"), side); });
 }
 
 function openBoxMenu(side, best, clientX, clientY) {
@@ -971,6 +1038,9 @@ function renderSide(side) {
   const cv = $("cv"); draw(cv, side);
   cv.addEventListener("click", e => { if (!S.drawing) onCanvasClick(e, side); });
   cv.addEventListener("keydown", e => { if (!S.drawing) onCanvasKey(e, side); });
+  cv.addEventListener("pointermove", e => onCanvasHover(e, side));
+  cv.addEventListener("pointerdown", e => { if (e.pointerType !== "mouse") onCanvasHover(e, side); });
+  cv.addEventListener("pointerleave", () => { if (q.hover != null) { q.hover = null; draw(cv, side); } });
   $("tabbody").querySelectorAll("[data-region]").forEach(b => b.addEventListener("click", () => toggleRegion(side, +b.dataset.region)));
   $("drawarea")?.addEventListener("click", () => { if (S.drawing) { S.drawing(); return; } startDrawArea(side); });
   $("zoomtoggle")?.addEventListener("click", () => { q.full = !q.full; renderWork(); });
@@ -1087,10 +1157,24 @@ $("theme").addEventListener("click", () => {
   try { localStorage.setItem("wq-theme", next); } catch {}
 });
 $("newq").addEventListener("click", async () => {
+  const snap = snapshot(), hadWork = Object.keys(S.photos).length > 0 || hasRealQuote();
   for (const s of SIDES) await setPhoto(s, null, true);
-  S.quote = null; $("bname").value = ""; refreshRun(); renderWork(); $("bname").focus();
+  S.quote = null; $("bname").value = ""; S.builderOpen = true; refreshRun(); renderWork(); $("bname").focus();
+  if (hadWork) toast("Started a new quote", { label: "Undo", fn: () => { restore(snap); toast("Previous quote restored"); } });
 });
-["base", "mult"].forEach(id => $(id).addEventListener("input", renderWork));
+$("base").addEventListener("input", () => {
+  const v = parseFloat($("base").value);
+  const bad = !(v > 0);
+  $("baseErr").hidden = !bad;
+  $("baseErr").textContent = bad ? `Enter a price above $0. Using ${money(S.base)} until you do.` : "";
+  $("base").setAttribute("aria-invalid", String(bad));
+  if (!bad) S.base = v;
+  renderWork();
+});
+$("base").addEventListener("blur", () => {  // leaving the field with a bad value puts the last good one back
+  if (!(parseFloat($("base").value) > 0)) { $("base").value = S.base; $("baseErr").hidden = true; $("base").setAttribute("aria-invalid", "false"); }
+});
+$("mult").addEventListener("input", renderWork);
 $("thresh").addEventListener("input", () => $("threshV").textContent = (+$("thresh").value).toFixed(2));
 $("go").addEventListener("click", run);
 

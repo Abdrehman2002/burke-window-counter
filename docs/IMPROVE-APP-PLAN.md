@@ -25,7 +25,7 @@ Intake answers:
 |---|---|---|---|---|
 | 1 | jobs-to-be-done | done | CUSTOMER.md | 2026-09-26 |
 | 2 | ux-heuristics | done | DESIGN.md, EXPERIMENTS.md | 2026-09-26 |
-| 3 | design-everyday-things | pending | DESIGN.md, EXPERIMENTS.md | |
+| 3 | design-everyday-things | done | DESIGN.md, EXPERIMENTS.md | 2026-09-26 |
 | 4 | refactoring-ui | pending | DESIGN.md, EXPERIMENTS.md | |
 | 5 | microinteractions | pending | DESIGN.md, EXPERIMENTS.md | |
 | 6 | made-to-stick | pending | POSITIONING.md, EXPERIMENTS.md | |
@@ -45,12 +45,15 @@ Statuses: pending · in-progress · awaiting-evidence · done · deferred: <reas
 | 2026-09-26 | 1 | Job statement approved as written | Reads without the product; matches Burke's own words |
 | 2026-09-26 | 1 | Worst dimension = **functional accuracy** | Abdur: count accuracy before trust or polish; phases 2-9 aim at correct counts that are visibly correct |
 | 2026-09-26 | 1 | Most likely leak = **Big Hire (the demo)** | If the demo doesn't convince on his building types he never starts; demo-critical flows go first |
+| 2026-09-26 | 3 | Fix all five severity-3 issues now (near-miss tap + pointer highlight, no silent $0 price, removing a photo removes its side, undo for sample and New quote); severity 1-2 to backlog | Abdur's choice. Rule: guard-rails where the mistake can be made impossible, Undo instead of confirm dialogs. Score 4/10 → 7/10 |
 | 2026-09-26 | 2 | Fix all four severity-3 issues now (framed photo, land on result on phones, undo a recount, 44 px targets); severity 1-2 to backlog | Abdur's choice; the four are the demo-critical ones. Score 6/10 → 8/10 |
 
 ## Next Actions
 - [x] Phase 1: job statement, three dimensions, alternatives (done 2026-09-26)
 - [x] Phase 2: heuristic evaluation; 4 severity-3 fixes shipped and browser-tested (2026-09-26)
-- [ ] Phase 3: design-everyday-things on the core flows: count, pick, check, fix, destructive actions (Claude, next)
+- [x] Phase 3: 5 severity-3 error-proofing fixes shipped and browser-tested (2026-09-26)
+- [ ] Phase 4: refactoring-ui visual hierarchy pass (Claude, next)
+- [ ] Backlog P3-6..P3-13 guard-rails, stale settings, per-action undo (Claude)
 - [ ] Backlog UX #5 (clickable "things to check") and #6 (floor row highlights its windows) (Claude)
 - [ ] Accuracy work routed to code (from Phase 1 decision): glass-door, balcony and storefront detection as their own types; see AUDIT.md P1 #3 (Claude)
 - [ ] Interview Burke on his timeline (first quote, what he tried, what scared him) to evidence the emotional and social dimensions (Abdur, on the first call)

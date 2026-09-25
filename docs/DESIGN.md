@@ -20,6 +20,9 @@ accent `#3A7BFF`. Warning amber `#A35F00` / `#FFB938`. Floor colours: 8 fixed hu
 | Photo viewer | Frames the chosen buildings (zoomed, drawn at high resolution); "Show whole photo" toggle | shipped 2026-09-26 |
 | Setup panel on phones | Folds into one "Edit photos & prices" bar once a real quote exists | shipped 2026-09-26 |
 | Toast | Can carry one action button (Undo), stays 9 s when it does | shipped 2026-09-26 |
+| Snapshot / restore | One helper captures photos, quote, name and tab before any reset; Undo restores all of it | shipped 2026-09-26 |
+| Price input | Holds the last valid value; inline error with `aria-invalid` and `role=alert` | shipped 2026-09-26 |
+| Pointer highlight | White outline on the window under the pointer or finger; pointer cursor only over windows | shipped 2026-09-26 |
 
 ## UX Audit Findings
 Phase 2 (ux-heuristics), 2026-09-26. Heuristic evaluation of the demo flow (add photo → Count → pick
@@ -45,6 +48,32 @@ building → check → fix → summary), desktop and phone. **Score before: 6/10
 
 **Score after the fixes: 8/10.** To reach 10: #5 and #6 (what to check, and where), plus the Phase 6
 wording.
+
+### Phase 3 (design-everyday-things), 2026-09-26
+Probed in the browser: blank or odd prices, a sample over real photos, removing a photo after
+counting, a near-miss tap, deselecting every building, changing settings after a count, and New
+quote. **Score before: 4/10** (error recovery and evaluation failing). Heuristic column = Norman gulf
+or error type.
+
+| # | Issue | Heuristic (gulf / error type) | Severity (0-4) | Fix | Status |
+|---|---|---|---|---|---|
+| P3-1 | Tapping just beside a window unselected the whole building ($204 → $141 on one mis-tap) | Execution; action slip | 3 | A counted building is never dropped by a photo tap (a hint points to its chip); dimmed buildings can still be tapped to add. White outline on the window under the pointer or finger | **fixed** 2026-09-26 |
+| P3-2 | Blank, zero or negative first-floor price silently made the quote $0 | Constraint; mistake | 3 | Price only changes to a valid amount; inline "Enter a price above $0. Using $3 until you do."; leaving the field restores the last good value | **fixed** 2026-09-26 |
+| P3-3 | Removing a photo after counting left that side in the total | Evaluation (system state wrong) | 3 | The side leaves the quote with it; toast with Undo restores both | **fixed** 2026-09-26 |
+| P3-4 | Picking a sample wiped the user's photos with no undo | Destructive action | 3 | Toast with Undo restores photos, quote and name | **fixed** 2026-09-26 |
+| P3-5 | New quote wiped everything instantly with no undo | Destructive action | 3 | Toast with Undo restores photos, quote and name | **fixed** 2026-09-26 |
+| P3-6 | Every building unselected → that side quietly $0 | Constraint; mistake | 2 | The last selected building can't be unselected; its chip says why | backlog |
+| P3-7 | Multiplier below 1 quietly treated as 1 while the field shows the typed value | Evaluation | 2 | Inline "Minimum ×1"; the field corrects itself when you leave it | backlog |
+| P3-8 | Changing sensitivity or floor grouping after a count has no effect and no signal | Mode error | 2 | "Settings changed: Count again to apply" | backlog |
+| P3-9 | Merge and Add floor below undo only via whole-side Undo | Recovery | 2 | Each action's toast carries its own Undo | backlog |
+| P3-11 | Print or Copy with no name gives "Untitled building" on the customer's quote | Memory lapse | 2 | Name field on the Summary tab; nudge when empty | backlog |
+| P3-12 | Detection errors read technical ("window detector unavailable (…)") | Error message (what/why/how) | 2 | "Couldn't reach the window finder. Check your connection and press Count again. Your photos are kept." | backlog (Phase 6) |
+| P3-13 | − at 0 does nothing, silently | Constraint | 1 | Disable − at 0 | backlog |
+
+**Rule set:** use a guard-rail where the mistake can be made impossible (P3-1, 2, 6, 7, 13); use Undo
+instead of an "are you sure?" dialog wherever work is thrown away (P3-3, 4, 5, 9).
+**Score after: 7/10.** Recovery and constraints fixed for the severity-3 paths; stale settings (P3-8)
+and the smaller guard-rails remain.
 
 ## Microinteraction Inventory
 | Interaction | Trigger/Rules/Feedback/Loops | Fix | Status |

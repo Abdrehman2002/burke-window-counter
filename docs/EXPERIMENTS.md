@@ -30,3 +30,11 @@
 | Floor row highlights its windows on the photo (UX #6) | 8/7/6 | backlog, candidate for Phase 5 |
 | De-overlap badges, simpler chip labels (UX #7) | 4/8/7 | backlog |
 | Detect glass doors, balcony glass, storefronts as their own types (Phase 1 accuracy decision) | 9/6/5 | backlog (code) |
+| A near-miss tap never drops a building; highlight the window under the pointer (P3-1) | 8/9/7 | shipped 2026-09-26 (metric: 0 accidental building drops in the demo recording and Burke's first 10 quotes) |
+| Price keeps its last valid value; inline error (P3-2) | 8/9/9 | shipped 2026-09-26 (metric: 0 quotes sent at $0 or with a blank price) |
+| Removing a photo removes its side, with Undo (P3-3) | 7/9/8 | shipped 2026-09-26 (metric: quote total always equals the sum of sides that have photos) |
+| Undo for sample loading and New quote (P3-4, P3-5) | 7/9/8 | shipped 2026-09-26 (metric: 0 reports of lost photos or quotes) |
+| Last building can't be unselected (P3-6); multiplier minimum shown (P3-7); − disabled at 0 (P3-13) | 5/8/9 | backlog |
+| "Settings changed: Count again to apply" (P3-8) | 6/8/8 | backlog |
+| Per-action Undo on merge and Add floor below (P3-9) | 6/8/7 | backlog |
+| Name on the Summary tab with a nudge before print or copy (P3-11) | 6/8/8 | backlog |
