@@ -60,6 +60,11 @@
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
   .fielderr { font-size: 12px; color: var(--bad); margin-top: 4px; }
   .input[aria-invalid="true"] { border-color: var(--bad); }
+  .lock { position: fixed; inset: 0; z-index: 100; background: var(--ground); display: grid; place-items: center; padding: 16px; }
+  .lockcard { width: 100%; max-width: 360px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+              box-shadow: var(--shadow); padding: 24px; display: grid; gap: 12px; }
+  .lockcard label { font-size: 13px; color: var(--muted); }
+  body.locked > :not(.lock):not(script) { visibility: hidden; }
   .foldbar { display: none; width: 100%; border: 0; background: var(--panel); border-radius: 16px; padding: 16px 16px;
              text-align: left; justify-content: space-between; align-items: center; gap: 12px; min-height: 52px; font-size: 13px; }
   .foldbar b { color: var(--accent); font-weight: 600; white-space: nowrap; }
@@ -263,6 +268,15 @@
 </style>
 </head>
 <body>
+<div class="lock" id="lock" hidden>
+  <form class="lockcard" id="lockform">
+    <div class="brand"><span class="mark"><svg viewBox="0 0 14 14" fill="none" stroke="#fff" stroke-width="2"><path d="M7 1v12M1 7h12"/></svg></span>Window Quote</div>
+    <label for="lockpw">Password</label>
+    <input class="input" id="lockpw" type="password" autocomplete="current-password" required>
+    <div class="fielderr" id="lockerr" role="alert" hidden></div>
+    <button class="btn" type="submit" id="lockbtn">Unlock</button>
+  </form>
+</div>
 <header class="top">
   <div class="top-in">
     <div class="brand"><span class="mark"><svg viewBox="0 0 14 14" fill="none" stroke="#fff" stroke-width="2"><path d="M7 1v12M1 7h12"/></svg></span>Window Quote</div>
@@ -507,10 +521,34 @@ function renderStairs() {
 /* ================= access code (only if the server asks for one) ================= */
 function accessCode() { try { return localStorage.getItem("wq-code") || ""; } catch { return ""; } }
 function apiHeaders() { return { "Content-Type": "application/json", "X-Access-Code": accessCode() }; }
-function askForCode() {
-  const f = $("codebox"); f.hidden = false; $("code").focus();
-  setMsg("Enter the access code, then press Count again.", true);
+function askForCode() { lockScreen("Enter the password again."); }
+// The whole page stays behind the password. The server checks it; the browser only remembers it.
+async function codeWorks(code) {
+  try {
+    const r = await fetch("api/count", { headers: { "X-Access-Code": code }, cache: "no-store" });
+    return r.status === 200 ? true : r.status === 429 ? "rate" : false;
+  } catch { return "net"; }
 }
+function lockScreen(msg) {
+  document.body.classList.add("locked"); $("lock").hidden = false;
+  $("lockerr").hidden = !msg; $("lockerr").textContent = msg || "";
+  setTimeout(() => $("lockpw").focus(), 0);
+}
+$("lockform").addEventListener("submit", async e => {
+  e.preventDefault();
+  const code = $("lockpw").value; $("lockbtn").disabled = true;
+  const ok = await codeWorks(code);
+  $("lockbtn").disabled = false;
+  if (ok === true) {
+    try { localStorage.setItem("wq-code", code); } catch {}
+    $("lock").hidden = true; document.body.classList.remove("locked"); $("lockpw").value = "";
+    $("go").focus();
+  } else {
+    $("lockerr").hidden = false;
+    $("lockerr").textContent = ok === "rate" ? "Too many tries. Wait a few minutes." : ok === "net" ? "Couldn't reach the server. Check your connection." : "Wrong password.";
+    $("lockpw").select();
+  }
+});
 $("codebox").addEventListener("submit", e => {
   e.preventDefault();
   try { localStorage.setItem("wq-code", $("code").value.trim()); } catch {}
@@ -1184,6 +1222,8 @@ $("thresh").addEventListener("input", () => $("threshV").textContent = (+$("thre
 $("go").addEventListener("click", run);
 
 (async function start() {
+  document.body.classList.add("locked");
+  if ((await codeWorks(accessCode())) !== true) lockScreen(); else document.body.classList.remove("locked");
   try { applyTheme(localStorage.getItem("wq-theme")); } catch { applyTheme(null); }
   buildSlots(); refreshRun();
   // Open on a finished example so the first look shows what it does. It is labelled as an example.

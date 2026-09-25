@@ -10,10 +10,14 @@ Returns {"width", "height", "boxes": [{x0,y0,x1,y1,conf,floor,edge,other_side,we
          "n_floors", "note", "floors_check", "seconds"}
 or {"error": "...", "code": "..."} with a 4xx/5xx status.
 
-If the ACCESS_CODE environment variable is set, every request must send it in the X-Access-Code header.
+Every request must send the password in the X-Access-Code header. The password is checked against the
+ACCESS_CODE environment variable if set, else against ACCESS_CODE_SHA256 (a SHA-256 hex digest), else
+against the built-in digest below. Only a hash is kept in the code, never the password itself.
+GET /api/count answers 200 for the right password and 401 otherwise (the page uses it to unlock).
 Pricing and drawing happen in the browser, so changing a price never calls this again.
 """
 import base64
+import hashlib
 import hmac
 import io
 import json
@@ -29,6 +33,7 @@ from _core import MAX_BOXES, Box, load_env, run_area, run_side  # noqa: E402
 from PIL import Image, ImageOps  # noqa: E402
 
 load_env()
+DEFAULT_CODE_SHA256 = "c2178a776b95281b1a7c47470d0c80bfa97f9d83bd225694d4164129c1795246"  # set 2026-09-26; change with ACCESS_CODE or ACCESS_CODE_SHA256 in Vercel
 MAX_SIDE = 1600
 MAX_PIXELS = 40_000_000  # ~40 MP: bigger than any phone photo; stops decompression bombs
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
@@ -61,10 +66,17 @@ def _load_image(raw_b64: str) -> Image.Image:
     return ImageOps.exif_transpose(im).convert("RGB")
 
 
-def process(body: bytes, access_code: str | None = None, ip: str = "local") -> tuple[int, dict]:
+def code_ok(code: str | None) -> bool:
     want = os.environ.get("ACCESS_CODE", "")
-    if want and not hmac.compare_digest(want, access_code or ""):
-        return 401, {"error": "This needs the access code.", "code": "auth"}
+    if want:
+        return hmac.compare_digest(want, code or "")
+    digest = os.environ.get("ACCESS_CODE_SHA256", DEFAULT_CODE_SHA256)
+    return hmac.compare_digest(hashlib.sha256((code or "").encode()).hexdigest(), digest)
+
+
+def process(body: bytes, access_code: str | None = None, ip: str = "local") -> tuple[int, dict]:
+    if not code_ok(access_code):
+        return 401, {"error": "Wrong or missing password.", "code": "auth"}
     if not _rate_ok(ip):
         return 429, {"error": "Too many photos in a short time. Wait a few minutes and try again.", "code": "rate"}
     try:
@@ -127,5 +139,10 @@ class handler(BaseHTTPRequestHandler):
         status, payload = process(body, self.headers.get("x-access-code"), ip)
         self._send(status, payload)
 
-    def do_GET(self):
+    def do_GET(self):  # password check for the page's unlock screen
+        ip = (self.headers.get("x-forwarded-for") or self.client_address[0] or "?").split(",")[0].strip()
+        if not _rate_ok(ip):
+            return self._send(429, {"error": "Too many tries. Wait a few minutes.", "code": "rate"})
+        if not code_ok(self.headers.get("x-access-code")):
+            return self._send(401, {"error": "Wrong password.", "code": "auth"})
         self._send(200, {"ok": True})

@@ -23,12 +23,17 @@ class Dev(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path.startswith("/api/count"):
+            return ApiHandler.do_GET(self)
         if path in ALLOWED or (path.startswith("/photos/") and "/." not in path and ".." not in path):
             return super().do_GET()
         self.send_error(404)
 
     def do_HEAD(self):
         self.do_GET()
+
+    def do_GET_api(self):
+        return ApiHandler.do_GET(self)
 
     def do_POST(self):
         if self.path.startswith("/api/count"):
