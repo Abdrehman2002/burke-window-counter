@@ -39,7 +39,7 @@ def process(body: bytes) -> tuple[int, dict]:
         return 502, {"error": f"Window detection failed ({str(e)[:200]})"}
     return 200, {
         "width": img.width, "height": img.height,
-        "boxes": [{"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "conf": b.conf, "floor": int(b.floor), "edge": bool(b.edge), "other_side": bool(b.other_side)}
+        "boxes": [{"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "conf": b.conf, "floor": int(b.floor), "edge": bool(b.edge), "other_side": bool(b.other_side), "weak": bool(b.weak)}
                   for b in res.boxes],
         "n_floors": len(res.floors), "note": res.note, "floors_check": bool(res.floors_check), "seconds": round(time.time() - t, 1),
     }

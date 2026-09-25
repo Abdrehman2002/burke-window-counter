@@ -442,7 +442,7 @@ async function run() {
 
 // Windows cut off by the photo's edge, or on a wall other than the one this photo quotes, start out
 // not counted (dashed); a click brings one back.
-const skipped = b => !!(b.edge || b.other_side);
+const skipped = b => !!(b.edge || b.other_side || b.weak);
 const edgeSet = r => new Set(r.boxes.map((b, i) => skipped(b) ? i : -1).filter(i => i >= 0));
 // Everything the viewer can change on one side: which boxes count, which floor each box is on, per-floor
 // +/- adjustments, and how many floors there are.
@@ -478,35 +478,55 @@ const quoteChecks = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideCh
 const quoteEdited = () => Object.keys(S.quote.sides).some(sideEdited);
 
 /* ================= drawing ================= */
+// A floor is level in the photo when its windows line up; on a photo taken looking up it slopes, and a
+// horizontal band would point at the wrong windows, so it gets a line through its windows instead.
+function isLevel(bs) {
+  if (bs.length < 2) return true;
+  const hs = bs.map(b => b.y1 - b.y0).sort((a, b) => a - b), h = hs[hs.length >> 1];
+  const cys = bs.map(b => (b.y0 + b.y1) / 2);
+  return Math.max(...cys) - Math.min(...cys) < 0.8 * h;
+}
+
+// Bands first, then every box on top, so no floor's band can paint over another floor's boxes.
 function draw(canvas, side) {
   const q = S.quote.sides[side], r = q.res, img = q.img;
   canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
   const g = canvas.getContext("2d"), W = canvas.width, k = W / r.width;
   const lw = Math.max(2, W / 450), fs = Math.round(Math.max(15, W / 58));
   g.drawImage(img, 0, 0);
-  const lines = floorsOf(side);
-  for (const fl of lines) {
-    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === fl.floor);
-    if (!idx.length) continue;
-    const col = colour(fl.floor);
-    const top = Math.min(...idx.map(i => r.boxes[i].y0)) * k, bot = Math.max(...idx.map(i => r.boxes[i].y1)) * k;
-    g.globalAlpha = 0.14; g.fillStyle = col; g.fillRect(0, top, W, bot - top); g.globalAlpha = 1;
-    for (const i of idx) {
-      const b = r.boxes[i], x = b.x0 * k, y = b.y0 * k, w = (b.x1 - b.x0) * k, h = (b.y1 - b.y0) * k;
-      if (q.removed.has(i)) {
-        g.setLineDash([lw * 3, lw * 2]); g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = lw; g.strokeRect(x, y, w, h);
-        g.setLineDash([]); g.strokeStyle = "rgba(255,80,80,.95)"; g.beginPath(); g.moveTo(x, y); g.lineTo(x + w, y + h); g.moveTo(x + w, y); g.lineTo(x, y + h); g.stroke();
-      } else if (b.conf < CHECK_BELOW) {
-        g.strokeStyle = "#FFAA00"; g.lineWidth = lw * 2; g.strokeRect(x, y, w, h);
-      } else {
-        g.strokeStyle = col; g.lineWidth = lw; g.strokeRect(x, y, w, h);
-      }
-    }
-    const label = ` Floor ${fl.floor} · ${fl.windows} `;
-    g.font = `600 ${fs}px Poppins, "Segoe UI", sans-serif`;
-    const tw = g.measureText(label).width;
-    g.fillStyle = col; g.fillRect(0, top, tw + 10, fs + 12);
-    g.fillStyle = "#fff"; g.textBaseline = "top"; g.fillText(label, 5, top + 6);
+  const layers = floorsOf(side).map(fl => {
+    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === fl.floor && !q.removed.has(i));
+    return { fl, idx, bs: idx.map(i => r.boxes[i]), col: colour(fl.floor) };
+  }).filter(L => L.idx.length);
+  for (const L of layers) if (isLevel(L.bs)) {
+    const top = Math.min(...L.bs.map(b => b.y0)) * k, bot = Math.max(...L.bs.map(b => b.y1)) * k;
+    g.globalAlpha = 0.14; g.fillStyle = L.col; g.fillRect(0, top, W, bot - top); g.globalAlpha = 1;
+  }
+  for (const L of layers) if (!isLevel(L.bs)) {
+    const pts = L.bs.map(b => [(b.x0 + b.x1) / 2 * k, (b.y0 + b.y1) / 2 * k]).sort((a, b) => a[0] - b[0]);
+    g.strokeStyle = L.col; g.globalAlpha = 0.85; g.lineWidth = lw * 1.6; g.beginPath();
+    pts.forEach(([x, y], n) => n ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke(); g.globalAlpha = 1;
+  }
+  r.boxes.forEach((b, i) => {
+    if (!q.removed.has(i)) return;
+    const x = b.x0 * k, y = b.y0 * k, w = (b.x1 - b.x0) * k, h = (b.y1 - b.y0) * k;
+    g.setLineDash([lw * 3, lw * 2]); g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = lw; g.strokeRect(x, y, w, h);
+    g.setLineDash([]); g.strokeStyle = "rgba(255,80,80,.95)"; g.beginPath(); g.moveTo(x, y); g.lineTo(x + w, y + h); g.moveTo(x + w, y); g.lineTo(x, y + h); g.stroke();
+  });
+  for (const L of layers) for (const b of L.bs) {
+    const x = b.x0 * k, y = b.y0 * k, w = (b.x1 - b.x0) * k, h = (b.y1 - b.y0) * k;
+    if (b.conf < CHECK_BELOW) { g.strokeStyle = "#FFAA00"; g.lineWidth = lw * 2; }
+    else { g.strokeStyle = L.col; g.lineWidth = lw; }
+    g.strokeRect(x, y, w, h);
+  }
+  g.font = `600 ${fs}px Poppins, "Segoe UI", sans-serif`; g.textBaseline = "top";
+  for (const L of layers) {
+    const level = isLevel(L.bs), lead = L.bs.reduce((a, b) => b.x0 < a.x0 ? b : a);
+    const label = ` Floor ${L.fl.floor} · ${L.fl.windows} `, tw = g.measureText(label).width;
+    let lx = level ? 0 : Math.max(0, lead.x0 * k - 4), ty = level ? Math.min(...L.bs.map(b => b.y0)) * k : lead.y0 * k - fs - 14;
+    lx = Math.min(lx, W - tw - 12); ty = Math.max(0, ty);
+    g.fillStyle = L.col; g.fillRect(lx, ty, tw + 10, fs + 12);
+    g.fillStyle = "#fff"; g.fillText(label, lx + 5, ty + 6);
   }
 }
 
@@ -622,7 +642,7 @@ function renderSide(side) {
         <div class="legend">
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
           <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
-          <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (another side, next door, or removed)</span>
+          <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (another side, next door, too unsure, or removed)</span>
           <span>Click any window to move it to another floor or stop counting it.</span>
         </div>
       </div>
@@ -638,9 +658,12 @@ function renderSide(side) {
               <button type="button" data-f="${f.floor}" data-d="1" aria-label="One more window on floor ${f.floor}">+</button></div>
             <div class="amt num">${money(f.subtotal)}</div>
           </div>`).join("")}</div>
-        <button class="linkbtn" id="addfloor" type="button">+ Add a floor it missed</button>
+        <div class="row" style="display:flex;gap:16px;flex-wrap:wrap">
+          <button class="linkbtn" id="addfloor" type="button">+ Add a floor on top</button>
+          <button class="linkbtn" id="addbelow" type="button" title="The ground floor was missed: everything moves up one floor">+ Add a floor below</button>
+        </div>
         <div class="fsum"><span>${sideWindows(side)} windows</span><b class="num">${money(sideTotal(side))}</b></div>
-        ${q.res.floors_check && !sideEdited(side) ? `<div class="hint warn"><b>Check the floors.</b> ${esc(q.res.note)}</div>` : (q.res.note && !q.res.floors_check ? `<div class="hint">${esc(q.res.note)}</div>` : "")}
+        ${q.res.floors_check && !sideEdited(side) ? `<div class="hint warn">${esc(q.res.note)}</div>` : (q.res.note && !q.res.floors_check ? `<div class="hint">${esc(q.res.note)}</div>` : "")}
         ${checks ? `<div class="hint warn">${checks} floor${checks > 1 ? "s have" : " has"} a window the detector wasn't sure about (amber). Look at those before sending.</div>` : ""}
         ${sideEdited(side) ? `<button class="linkbtn" id="undo" type="button">Undo my changes on this side</button>` : ""}
       </div>
@@ -652,6 +675,14 @@ function renderSide(side) {
     q.adjust[f] = (q.adjust[f] || 0) + d; renderWork();
   }));
   $("addfloor").addEventListener("click", () => { q.nf++; q.adjust[q.nf] = 1; renderWork(); });
+  // A missed ground floor: every window moves up one floor (and one price step), and a new floor 1 starts
+  // at one window for the viewer to set with + and -.
+  $("addbelow").addEventListener("click", () => {
+    q.fl = q.fl.map(v => v + 1);
+    const adj = { 1: 1 };
+    for (const [k, v] of Object.entries(q.adjust)) adj[+k + 1] = v;
+    q.adjust = adj; q.nf++; renderWork(); toast("Added a ground floor. Everything above moved up one.");
+  });
   $("tabbody").querySelectorAll("[data-merge]").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.merge; mergeDown(side, f); renderWork(); toast(`Floor ${f} merged into floor ${f - 1}`);
   }));
