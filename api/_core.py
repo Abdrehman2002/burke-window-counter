@@ -1534,6 +1534,60 @@ def _zoom_pass(img: Image.Image, polys, raw: list[Box], thresh=0.4) -> list[Box]
             for b in found]
 
 
+def default_regions(img: Image.Image, regions: list[dict], polys) -> list[int]:
+    """The building the photo is most likely of: the one taking up the most of the picture, weighted
+    towards the middle (people frame the building they are quoting). Window count only breaks ties, so a
+    small building at the edge with the same number of windows never wins.
+
+    A glass wall is part of the building it sits in, so the two are chosen together, and the building's
+    whole outline counts towards the choice even when the glass took all of its windows."""
+    W, H = img.size
+
+    def poly_of(r):
+        return np.array(r["polygon"], dtype=float) if len(r.get("polygon") or []) >= 3 else None
+
+    def inside(pt, P):
+        x, y = pt; ins = False
+        for i in range(len(P)):
+            (xi, yi), (xj, yj) = P[i], P[i - 1]
+            if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-9) + xi:
+                ins = not ins
+        return ins
+    # building outlines, each with the regions (walls, glass walls) that sit in it
+    units = []
+    for bp in polys or []:
+        B = np.array(bp, dtype=float)
+        members = []
+        for r in regions:
+            P = poly_of(r)
+            c = (P[:, 0].mean(), P[:, 1].mean()) if P is not None else None
+            if c is not None and inside(c, B):
+                members.append(r)
+        if any(m["windows"] > 0 for m in members):
+            units.append((B, members))
+    placed = {id(m) for _, ms in units for m in ms}
+    for r in regions:  # regions outside every building outline stand alone
+        if id(r) not in placed and r["windows"] > 0 and poly_of(r) is not None:
+            units.append((poly_of(r), [r]))
+    if not units:
+        live = [r for r in regions if r["windows"] > 0]
+        return [max(live, key=lambda r: r["windows"])["id"]] if live else []
+
+    def score(unit):
+        B, members = unit
+        B = B.copy(); B[:, 0] = B[:, 0].clip(0, W); B[:, 1] = B[:, 1].clip(0, H)
+        area = _poly_area(B.tolist()) / (W * H)
+        central = 1 - 0.6 * abs(float(B[:, 0].mean()) - W / 2) / (W / 2)
+        return (area * central, sum(m["windows"] for m in members))
+    _, members = max(units, key=score)
+    live = [m for m in members if m["windows"] > 0]
+    walls = [m for m in live if not m.get("glass")]
+    # a corner shot's two walls are separate sides: default to the one with more windows; glass comes along
+    pick = [max(walls, key=lambda m: m["windows"])] if walls else []
+    pick += [m for m in live if m.get("glass")]
+    return [m["id"] for m in pick]
+
+
 def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
              base=BASE_PRICE, mult=MULTIPLIER, floors="ai") -> SideResult:
     """Windows -> buildings/walls in the photo -> floors worked out separately for each one.
@@ -1627,7 +1681,7 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
             note += f" This may have {seen} storeys. If a floor was missed, use + Add a floor."
         r["note"] = note.strip()
     with_windows = [r for r in regions if r["windows"] > 0]
-    res.selected = [max(with_windows, key=lambda r: r["windows"])["id"]] if with_windows else []
+    res.selected = default_regions(img, regions, polys) if with_windows else []
     sel = [r for r in regions if r["id"] in res.selected]
     if getattr(detect_sam3, "failed_tiles", 0):
         for r in regions:

@@ -103,8 +103,11 @@ House benchmark unchanged at 83% after all of them.
 | C5 panes | A wide, short band (≥3.5:1) whose lights cover ≥80% of its width is one divided window (transom/ribbon). `COUNT_PANES=1` counts every pane | Cheese Store transoms: 20 → **1 per band** (floor 1: 3); house triples unchanged |
 | C4 far shots | Zoom-and-detect-again on small buildings. **Measured no gain** (the tiled pass already sees them), so off by default (`ZOOM_BELOW`). The strip mall's real problem is shop glass (C1) | Strip mall still 0 |
 
-**Still open:** C1 shop-front glass (low detector confidence; needs Burke's pricing rule), C6 default
-building pick. Glass-wall panel *rows* are not always storeys (glass can have 2 rows per floor), so
+**C6 fixed:** the default is the building that takes up the most of the photo, weighted towards the middle,
+together with any glass walls on it (window count only breaks ties). Seneca 426 now picks the main building;
+Hallidie picks its glass facade; the medical office picks its glass wall and brick part together.
+
+**Still open:** C1 shop-front glass (low detector confidence; needs Burke's pricing rule). Glass-wall panel *rows* are not always storeys (glass can have 2 rows per floor), so
 glass walls are always flagged for a check.
 
 ## P1: accuracy (the product is only as good as this)
