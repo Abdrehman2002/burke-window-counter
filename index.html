@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Window Quote</title>
+<meta name="description" content="Photograph each side of a building: every window is counted, grouped by floor and priced per floor.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='3' y='3' width='26' height='26' rx='6' fill='%23154BFF'/><path d='M16 7v18M7 16h18' stroke='white' stroke-width='3'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --ground: #F8F9FC; --panel: #FFFFFF; --sunk: #F1F4FA; --ink: #08142D; --muted: #5A6480; --faint: #8A93AA;
+    --line: #E2E7F1; --accent: #154BFF; --accent-ink: #FFFFFF; --accent-soft: #E9EFFF;
+    --warn: #A35F00; --warn-soft: #FFF3DB; --bad: #C62828; --ok: #1F7A4D;
+    --shadow: 0 1px 2px rgba(8,20,45,.05), 0 8px 24px rgba(8,20,45,.06);
+    --display: "Bebas Neue", "Oswald", Impact, "Arial Narrow", sans-serif;
+    --body: Poppins, "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #07101F; --panel: #0D1A33; --sunk: #0A1529; --ink: #F3F5FA; --muted: #A4AEC6; --faint: #6F7A96;
+      --line: #1E2F52; --accent: #3A7BFF; --accent-ink: #FFFFFF; --accent-soft: #14264F;
+      --warn: #FFB938; --warn-soft: #34270B; --bad: #FF7070; --ok: #4CC38A;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #07101F; --panel: #0D1A33; --sunk: #0A1529; --ink: #F3F5FA; --muted: #A4AEC6; --faint: #6F7A96;
+    --line: #1E2F52; --accent: #3A7BFF; --accent-ink: #FFFFFF; --accent-soft: #14264F;
+    --warn: #FFB938; --warn-soft: #34270B; --bad: #FF7070; --ok: #4CC38A;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--ground); color: var(--ink); font: 14.5px/1.55 var(--body); -webkit-font-smoothing: antialiased; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- top bar ---------- */
+  .top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: color-mix(in srgb, var(--ground) 88%, transparent);
+         backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .top-in { max-width: 1440px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 14px; }
+  .brand { display: flex; align-items: center; gap: 10px; font: 26px/1 var(--display); letter-spacing: .6px; }
+  .mark { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; }
+  .mark svg { width: 14px; height: 14px; }
+  .top .spacer { flex: 1; }
+  .iconbtn { border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 7px 12px; font-size: 13px; font-weight: 500; }
+  .iconbtn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---------- shell ---------- */
+  .shell { max-width: 1440px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+  .builder { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 72px); max-height: calc(100vh - 92px); overflow: auto; display: flex; flex-direction: column; }
+  .sec { padding: 18px 18px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 12px; }
+  .sec:last-child { border-bottom: 0; }
+  .sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .sec-h h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .sec-h .aside { font-size: 12px; color: var(--faint); }
+  label.f { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 5px; }
+  .input, select.input { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunk); }
+  .input:focus { border-color: var(--accent); outline: none; background: var(--panel); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .prefix { position: relative; }
+  .prefix span { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
+  .prefix .input { padding-left: 24px; }
+
+  /* photo slots */
+  .slots { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .slot { position: relative; aspect-ratio: 4 / 3; max-width: 100%; border: 1.5px dashed var(--line); border-radius: 12px; background: var(--sunk);
+          overflow: hidden; display: grid; place-items: center; text-align: center; transition: border-color .15s, background .15s; }
+  .slot:hover, .slot.drag { border-color: var(--accent); background: var(--accent-soft); }
+  .slot > button.pick { position: absolute; inset: 0; border: 0; background: transparent; }
+  .slot .empty { pointer-events: none; display: grid; gap: 2px; justify-items: center; padding: 8px; }
+  .slot .empty svg { width: 22px; height: 22px; color: var(--faint); }
+  .slot .empty b { font-size: 13px; font-weight: 600; }
+  .slot .empty small { font-size: 11.5px; color: var(--faint); }
+  .slot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+  .slot .tag { position: absolute; left: 7px; top: 7px; z-index: 2; background: rgba(8,20,45,.78); color: #fff; font-size: 11.5px;
+               font-weight: 600; border-radius: 999px; padding: 1px 9px; pointer-events: none; }
+  .slot .rm { position: absolute; right: 6px; top: 6px; z-index: 3; width: 26px; height: 26px; border-radius: 50%; border: 0;
+              background: rgba(8,20,45,.78); color: #fff; font-size: 15px; line-height: 1; }
+  .slot.filled { border-style: solid; }
+  .slot:not(.filled) .tag, .slot:not(.filled) .rm { display: none; }
+  .tip { font-size: 12px; color: var(--muted); margin: 0; }
+
+  /* rate staircase: the doubling, drawn */
+  .stairs { display: grid; grid-template-columns: repeat(6, 1fr); align-items: end; gap: 5px; height: 92px; padding-top: 4px; }
+  .stair { display: grid; align-content: end; gap: 3px; text-align: center; height: 100%; }
+  .stair i { display: block; border-radius: 5px 5px 2px 2px; min-height: 4px; }
+  .stair b { font-size: 11.5px; font-weight: 600; }
+  .stair span { font-size: 10.5px; color: var(--faint); }
+
+  details.adv summary { cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none; }
+  details.adv summary::before { content: "▸ "; }
+  details.adv[open] summary::before { content: "▾ "; }
+  details.adv .body { display: grid; gap: 12px; margin-top: 12px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  .run { position: sticky; bottom: 0; background: var(--panel); padding: 14px 18px 18px; border-top: 1px solid var(--line); border-radius: 0 0 16px 16px; display: grid; gap: 8px; }
+  .btn { border: 0; border-radius: 11px; padding: 12px 18px; font-weight: 600; background: var(--accent); color: var(--accent-ink); }
+  .btn:hover { filter: brightness(1.08); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  .btn.ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  .btn.ghost:hover { border-color: var(--accent); color: var(--accent); filter: none; }
+  .run .msg { font-size: 12.5px; color: var(--muted); min-height: 1.3em; }
+  .run .msg.err { color: var(--bad); }
+
+  /* ---------- workspace ---------- */
+  .work { display: grid; gap: 16px; min-width: 0; }
+  .banner { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px; background: var(--accent-soft); font-size: 13px; }
+  .banner b { font-weight: 600; }
+  .quotehead { padding: 20px 22px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: end; }
+  .quotehead .who { font-size: 12.5px; color: var(--muted); }
+  .quotehead h1 { margin: 2px 0 0; font: 34px/1.05 var(--display); letter-spacing: .5px; text-wrap: balance; }
+  .total { text-align: right; }
+  .total .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  .total .v { font: 64px/0.95 var(--display); color: var(--accent); letter-spacing: .5px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px 22px; padding: 0 22px 18px; font-size: 13.5px; color: var(--muted); }
+  .stats b { color: var(--ink); font-weight: 600; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+  .pill.edit { background: var(--accent-soft); color: var(--accent); }
+
+  .progress { padding: 18px 22px; display: grid; gap: 10px; }
+  .prog { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .prog .dot { width: 18px; height: 18px; flex: none; display: grid; place-items: center; }
+  .spin { width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: s .8s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
+
+  .tabs { display: flex; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tab { border: 0; background: none; padding: 12px 12px 11px; color: var(--muted); font-weight: 500; font-size: 13.5px;
+         border-bottom: 2px solid transparent; white-space: nowrap; display: flex; gap: 7px; align-items: center; }
+  .tab.on { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab .amt { color: var(--faint); font-weight: 400; }
+  .tab .wdot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+
+  .sidegrid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr); gap: 0; }
+  .viewer { padding: 16px; border-right: 1px solid var(--line); display: grid; gap: 10px; align-content: start; }
+  .canvaswrap { position: relative; border-radius: 12px; overflow: hidden; background: #0B1220; }
+  canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; border: 2px solid; }
+  .floors { padding: 16px 18px; display: grid; gap: 12px; align-content: start; }
+  .floors h3 { margin: 0; font: 26px/1.1 var(--display); letter-spacing: .4px; }
+  .frow { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .frow .sw { width: 12px; height: 34px; border-radius: 4px; }
+  .frow .nm { font-weight: 600; font-size: 14px; }
+  .frow .sub { font-size: 12px; color: var(--muted); }
+  .step { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--sunk); }
+  .step button { width: 32px; height: 32px; border: 0; background: transparent; font-size: 17px; }
+  .step button:hover { background: var(--accent-soft); color: var(--accent); }
+  .step output { min-width: 34px; text-align: center; font-weight: 600; }
+  .frow .amt { min-width: 76px; text-align: right; font-weight: 600; }
+  .fsum { display: flex; justify-content: space-between; align-items: baseline; padding-top: 4px; }
+  .fsum b { font: 30px/1 var(--display); letter-spacing: .4px; }
+  .hint { font-size: 12.5px; color: var(--muted); background: var(--sunk); border-radius: 10px; padding: 10px 12px; }
+  .hint.warn { background: var(--warn-soft); color: var(--warn); }
+  .linkbtn { border: 0; background: none; color: var(--accent); font-weight: 500; padding: 0; font-size: 13px; justify-self: start; }
+
+  .summary { padding: 16px 18px 20px; display: grid; gap: 14px; }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 10px 12px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  tfoot td { font-weight: 600; border-bottom: 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .empty-state { padding: 34px 26px; display: grid; gap: 22px; }
+  .empty-state h1 { margin: 0; font: 40px/1 var(--display); letter-spacing: .5px; }
+  .how { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .how div { background: var(--sunk); border-radius: 12px; padding: 14px; font-size: 13.5px; color: var(--muted); }
+  .how b { display: block; color: var(--ink); margin-bottom: 3px; }
+
+  .toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--ground);
+           padding: 9px 16px; border-radius: 10px; font-size: 13.5px; z-index: 50; }
+
+  /* ---------- print: a clean quote sheet ---------- */
+  .printsheet { display: none; }
+  @media print {
+    body { background: #fff; color: #000; }
+    .top, .shell { display: none !important; }
+    .printsheet { display: block; padding: 10mm; font: 12pt/1.5 var(--body); color: #08142D; }
+    .printsheet h1 { font: 34pt/1 var(--display); margin: 0 0 4mm; }
+    .printsheet table th, .printsheet table td { border-bottom: 1px solid #ccd; color: #08142D; }
+    .printsheet .big { font: 28pt/1 var(--display); color: #154BFF; }
+  }
+
+  @media (max-width: 1100px) {
+    .shell { grid-template-columns: 1fr; }
+    .builder { position: static; max-height: none; }
+    .run { position: static; }
+  }
+  @media (max-width: 760px) {
+    .shell { padding: 16px; }
+    .brand { font-size: 22px; white-space: nowrap; }
+    .iconbtn { padding: 6px 10px; white-space: nowrap; }
+    .top-in { padding-inline: 16px; }
+    .sidegrid { grid-template-columns: 1fr; }
+    .viewer { border-right: 0; border-bottom: 1px solid var(--line); }
+    .quotehead { grid-template-columns: 1fr; }
+    .total { text-align: left; }
+    .total .v { font-size: 52px; }
+    .how { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand"><span class="mark"><svg viewBox="0 0 14 14" fill="none" stroke="#fff" stroke-width="2"><path d="M7 1v12M1 7h12"/></svg></span>Window Quote</div>
+    <span class="spacer"></span>
+    <button class="iconbtn" id="newq" type="button">New quote</button>
+    <button class="iconbtn" id="theme" type="button" aria-label="Switch light or dark theme">Dark</button>
+  </div>
+</header>
+
+<main class="shell">
+  <!-- ================= quote builder ================= -->
+  <aside class="panel builder" aria-label="Quote builder">
+    <section class="sec">
+      <div class="sec-h"><h2>Building</h2></div>
+      <div>
+        <label class="f" for="bname">Name or address (shows on the quote)</label>
+        <input class="input" id="bname" placeholder="e.g. 214 Elm St, Dallas" autocomplete="off">
+      </div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-h"><h2>Photos</h2><span class="aside" id="photoCount">0 of 4 sides</span></div>
+      <div class="slots" id="slots"></div>
+      <p class="tip">Stand across the street and get the whole side in frame, straight on. Back, left and right are optional.</p>
+      <div>
+        <label class="f" for="sample">Or load a sample building (the system has never seen these)</label>
+        <select class="input" id="sample">
+          <option value="">Choose a sample…</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-h"><h2>Pricing</h2><span class="aside">per window</span></div>
+      <div class="two">
+        <div>
+          <label class="f" for="base">Floor 1 price</label>
+          <div class="prefix"><span>$</span><input class="input num" type="number" id="base" value="3" min="0" step="0.5"></div>
+        </div>
+        <div>
+          <label class="f" for="mult">Each floor up ×</label>
+          <input class="input num" type="number" id="mult" value="2" min="1" step="0.25">
+        </div>
+      </div>
+      <div class="stairs" id="stairs" aria-label="Price per window by floor"></div>
+      <details class="adv">
+        <summary>Detection settings</summary>
+        <div class="body">
+          <div>
+            <label class="f" for="floorsMode">Floor grouping</label>
+            <select class="input" id="floorsMode">
+              <option value="ai">AI with a geometry check (recommended)</option>
+              <option value="geometric">Geometry only (no AI)</option>
+            </select>
+          </div>
+          <div>
+            <label class="f" for="thresh">Detector sensitivity: <b id="threshV" class="num">0.40</b></label>
+            <input type="range" id="thresh" min="0.2" max="0.8" step="0.05" value="0.4">
+            <p class="tip">Lower finds more windows but may box things that aren't windows.</p>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <div class="run">
+      <button class="btn" id="go" type="button" disabled>Count windows and price it</button>
+      <div class="msg" id="msg" role="status">Add a photo of at least one side.</div>
+    </div>
+  </aside>
+
+  <!-- ================= workspace ================= -->
+  <section class="work" id="work" aria-live="polite"></section>
+</main>
+
+<div class="printsheet" id="printsheet"></div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const SIDES = ["Front", "Back", "Left", "Right"];
+const SAMPLES = [
+  ["1-storey house", "01_1storey_maracaibo.jpg"],
+  ["2-storey house with turret", "03_2storey_buffalo.jpg"],
+  ["Townhouse with dormers", "06_apt_karlsruhe.jpg"],
+  ["Victorian house", "10_irregular_knox.jpg"],
+  ["Modern house, irregular windows", "11_irregular_wien.jpg"],
+  ["Apartment block, angled with balconies (hard)", "07_apt_hirzenbach.jpg"],
+];
+const COLOURS = ["#154BFF", "#E63946", "#12A38A", "#F08C2E", "#8338EC", "#D4A000", "#0FA3D6", "#C2185B"];
+const CHECK_BELOW = 0.55;
+const MAX_SIDE = 1600;
+
+const S = {
+  photos: {},        // side -> dataURL (already shrunk)
+  quote: null,       // { name, sides: { side: {res, img, removed:Set, adjust:{}, extra:0} }, seconds, example }
+  running: null,     // { side: "wait" | "ok" | "err:<msg>" }
+  tab: null,
+};
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const money = v => "$" + (+v).toLocaleString("en-US", { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+const base = () => Math.max(0, parseFloat($("base").value) || 0);
+const mult = () => Math.max(1, parseFloat($("mult").value) || 1);
+const rate = n => base() * Math.pow(mult(), n - 1);
+const colour = n => COLOURS[(n - 1) % COLOURS.length];
+function toast(t) { const el = $("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
+
+/* ================= builder ================= */
+const CAMERA = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
+function buildSlots() {
+  $("slots").innerHTML = SIDES.map(s => `
+    <div class="slot" id="slot-${s}">
+      <div class="empty">${CAMERA}<b>${s}</b><small>${s === "Front" ? "Required" : "Optional"}</small></div>
+      <span class="tag">${s}</span>
+      <button class="pick" type="button" aria-label="Choose a photo for the ${s} side"></button>
+      <button class="rm" type="button" aria-label="Remove the ${s} photo">×</button>
+      <input type="file" accept="image/*" id="file-${s}" hidden>
+    </div>`).join("");
+  for (const s of SIDES) {
+    const el = $("slot-" + s), input = $("file-" + s);
+    el.querySelector(".pick").addEventListener("click", () => input.click());
+    input.addEventListener("change", () => { if (input.files[0]) setPhoto(s, input.files[0]); input.value = ""; });
+    el.querySelector(".rm").addEventListener("click", () => setPhoto(s, null));
+    el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("drag"); });
+    el.addEventListener("dragleave", () => el.classList.remove("drag"));
+    el.addEventListener("drop", e => { e.preventDefault(); el.classList.remove("drag"); if (e.dataTransfer.files[0]) setPhoto(s, e.dataTransfer.files[0]); });
+  }
+  $("sample").innerHTML += SAMPLES.map(([n, f]) => `<option value="${f}">${esc(n)}</option>`).join("");
+  $("sample").addEventListener("change", async e => {
+    const f = e.target.value; if (!f) return;
+    for (const s of SIDES) await setPhoto(s, null, true);
+    await setPhoto("Front", await (await fetch("photos/" + f)).blob());
+    if (!$("bname").value || $("bname").dataset.auto) { $("bname").value = "Sample: " + SAMPLES.find(x => x[1] === f)[0]; $("bname").dataset.auto = "1"; }
+    e.target.value = "";
+  });
+  $("bname").addEventListener("input", () => { delete $("bname").dataset.auto; if (S.quote) { S.quote.name = $("bname").value; renderWork(); } });
+}
+
+// Shrink in the browser: keeps each upload under Vercel's 4.5MB request limit and speeds everything up.
+async function shrink(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.9);
+}
+
+async function setPhoto(side, file, quiet) {
+  const el = $("slot-" + side);
+  el.querySelector("img")?.remove();
+  delete S.photos[side];
+  el.classList.remove("filled");
+  if (file) {
+    try {
+      S.photos[side] = await shrink(file);
+      const img = new Image(); img.src = S.photos[side]; img.alt = "";
+      el.prepend(img); el.classList.add("filled");
+    } catch { setMsg("That file isn't an image this browser can open. Try a JPG or PNG.", true); return; }
+  }
+  if (!quiet) refreshRun();
+}
+
+function setMsg(t, err) { $("msg").textContent = t; $("msg").classList.toggle("err", !!err); }
+function refreshRun() {
+  const n = Object.keys(S.photos).length;
+  $("photoCount").textContent = `${n} of 4 sides`;
+  $("go").disabled = n === 0 || !!S.running;
+  if (!S.running) setMsg(n ? `${n} side${n > 1 ? "s" : ""} ready. Takes about 10 seconds.` : "Add a photo of at least one side.");
+}
+
+function renderStairs() {
+  const vals = [1, 2, 3, 4, 5, 6].map(rate), max = Math.max(...vals) || 1;
+  $("stairs").innerHTML = vals.map((v, i) => `
+    <div class="stair"><b class="num">${money(v)}</b><i style="height:${Math.max(4, v / max * 58)}px;background:${colour(i + 1)}"></i><span>Floor ${i + 1}</span></div>`).join("");
+}
+
+/* ================= run ================= */
+async function run() {
+  const sides = SIDES.filter(s => S.photos[s]);
+  if (!sides.length) return;
+  S.running = Object.fromEntries(sides.map(s => [s, "wait"]));
+  refreshRun(); setMsg("Counting windows…"); renderWork();
+  const t0 = performance.now();
+  const opts = { thresh: +$("thresh").value, floors: $("floorsMode").value };
+  const out = {};
+  await Promise.all(sides.map(async s => {              // every side runs at the same time
+    try {
+      const r = await fetch("api/count", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ image: S.photos[s], ...opts }) });
+      const j = await r.json().catch(() => ({ error: `the server answered ${r.status}` }));
+      if (!r.ok || j.error) throw new Error(j.error || `the server answered ${r.status}`);
+      const img = new Image(); img.src = S.photos[s]; await img.decode();
+      out[s] = { res: j, img, removed: new Set(), adjust: {}, extra: 0 };
+      S.running[s] = "ok";
+    } catch (e) { S.running[s] = "err:" + e.message; }
+    renderWork();
+  }));
+  const failed = sides.filter(s => S.running[s].startsWith("err"));
+  S.running = null;
+  if (Object.keys(out).length) {
+    const ordered = Object.fromEntries(SIDES.filter(s => out[s]).map(s => [s, out[s]]));  // Front, Back, Left, Right
+    S.quote = { name: $("bname").value, sides: ordered, seconds: (performance.now() - t0) / 1000, example: false };
+    S.tab = Object.keys(out)[0];
+  }
+  refreshRun();
+  if (failed.length) setMsg(`Couldn't count ${failed.join(", ")}. Try again, or retake that photo straight on.`, true);
+  else setMsg(`Done in ${S.quote.seconds.toFixed(1)}s. Check the flagged floors, then send.`);
+  renderWork();
+}
+
+/* ================= quote maths (all in the browser, so it's instant) ================= */
+function floorsOf(side) {
+  const q = S.quote.sides[side], n = q.res.n_floors + q.extra, lines = [];
+  for (let f = 1; f <= n; f++) {
+    const idx = q.res.boxes.map((b, i) => i).filter(i => q.res.boxes[i].floor === f);
+    const kept = idx.filter(i => !q.removed.has(i));
+    const adj = q.adjust[f] || 0;
+    const windows = Math.max(0, kept.length + adj);
+    lines.push({ floor: f, detected: idx.length, windows, each: rate(f), subtotal: windows * rate(f),
+                 edited: adj !== 0 || kept.length !== idx.length || f > q.res.n_floors,
+                 check: kept.some(i => q.res.boxes[i].conf < CHECK_BELOW) });
+  }
+  return lines;
+}
+const sideTotal = s => floorsOf(s).reduce((a, f) => a + f.subtotal, 0);
+const sideWindows = s => floorsOf(s).reduce((a, f) => a + f.windows, 0);
+const quoteTotal = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideTotal(s), 0);
+const quoteWindows = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideWindows(s), 0);
+const quoteChecks = () => Object.keys(S.quote.sides).reduce((a, s) => a + floorsOf(s).filter(f => f.check).length, 0);
+const quoteEdited = () => Object.keys(S.quote.sides).some(s => floorsOf(s).some(f => f.edited));
+
+/* ================= drawing ================= */
+function draw(canvas, side) {
+  const q = S.quote.sides[side], r = q.res, img = q.img;
+  canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+  const g = canvas.getContext("2d"), W = canvas.width, k = W / r.width;
+  const lw = Math.max(2, W / 450), fs = Math.round(Math.max(15, W / 58));
+  g.drawImage(img, 0, 0);
+  const lines = floorsOf(side);
+  for (const fl of lines) {
+    const idx = r.boxes.map((b, i) => i).filter(i => r.boxes[i].floor === fl.floor);
+    if (!idx.length) continue;
+    const col = colour(fl.floor);
+    const top = Math.min(...idx.map(i => r.boxes[i].y0)) * k, bot = Math.max(...idx.map(i => r.boxes[i].y1)) * k;
+    g.globalAlpha = 0.14; g.fillStyle = col; g.fillRect(0, top, W, bot - top); g.globalAlpha = 1;
+    for (const i of idx) {
+      const b = r.boxes[i], x = b.x0 * k, y = b.y0 * k, w = (b.x1 - b.x0) * k, h = (b.y1 - b.y0) * k;
+      if (q.removed.has(i)) {
+        g.setLineDash([lw * 3, lw * 2]); g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = lw; g.strokeRect(x, y, w, h);
+        g.setLineDash([]); g.strokeStyle = "rgba(255,80,80,.95)"; g.beginPath(); g.moveTo(x, y); g.lineTo(x + w, y + h); g.moveTo(x + w, y); g.lineTo(x, y + h); g.stroke();
+      } else if (b.conf < CHECK_BELOW) {
+        g.strokeStyle = "#FFAA00"; g.lineWidth = lw * 2; g.strokeRect(x, y, w, h);
+      } else {
+        g.strokeStyle = col; g.lineWidth = lw; g.strokeRect(x, y, w, h);
+      }
+    }
+    const label = ` Floor ${fl.floor} · ${fl.windows} `;
+    g.font = `600 ${fs}px Poppins, "Segoe UI", sans-serif`;
+    const tw = g.measureText(label).width;
+    g.fillStyle = col; g.fillRect(0, top, tw + 10, fs + 12);
+    g.fillStyle = "#fff"; g.textBaseline = "top"; g.fillText(label, 5, top + 6);
+  }
+}
+
+// Click a box on the photo to remove it (or bring it back). Smallest box under the pointer wins.
+function onCanvasClick(e, side) {
+  const cv = e.currentTarget, rect = cv.getBoundingClientRect(), q = S.quote.sides[side], r = q.res;
+  const x = (e.clientX - rect.left) / rect.width * r.width, y = (e.clientY - rect.top) / rect.height * r.height;
+  let best = -1, area = Infinity;
+  r.boxes.forEach((b, i) => {
+    if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) { const a = (b.x1 - b.x0) * (b.y1 - b.y0); if (a < area) { area = a; best = i; } }
+  });
+  if (best < 0) return;
+  q.removed.has(best) ? (q.removed.delete(best), toast("Window added back")) : (q.removed.add(best), toast("Removed. Click it again to undo."));
+  renderWork();
+}
+
+/* ================= workspace ================= */
+function renderWork() {
+  renderStairs();
+  const w = $("work");
+  if (S.running) {
+    w.innerHTML = `<div class="panel progress">
+      <h2 style="margin:0;font:28px/1 var(--display);letter-spacing:.4px">Counting windows</h2>
+      ${Object.entries(S.running).map(([s, st]) => `
+        <div class="prog"><span class="dot">${st === "wait" ? '<span class="spin"></span>' : st === "ok" ? '<span class="pill ok">✓</span>' : '<span class="pill warn">!</span>'}</span>
+          <b>${s}</b><span style="color:var(--muted)">${st === "wait" ? "finding windows, then sorting them into floors…" : st === "ok" ? "done" : esc(st.slice(4))}</span></div>`).join("")}
+      <p class="tip">Each side takes about 5 to 12 seconds. All sides run at the same time.</p></div>`;
+    return;
+  }
+  if (!S.quote) {
+    w.innerHTML = `<div class="panel empty-state">
+      <h1>Quote a building from photos</h1>
+      <div class="how">
+        <div><b>Add a photo of each side</b>Front is enough to start. Straight on, whole side in frame.</div>
+        <div><b>Every window gets counted</b>Grouped by floor and priced at your per-floor rate.</div>
+        <div><b>Check it, then send it</b>Unsure floors are flagged. Click a box to remove it, or use + and −.</div>
+      </div></div>`;
+    return;
+  }
+  const q = S.quote, sides = Object.keys(q.sides), checks = quoteChecks();
+  const tabs = [...sides, "Summary"];
+  if (!tabs.includes(S.tab)) S.tab = tabs[0];
+  w.innerHTML = `
+    ${q.example ? `<div class="banner"><b>Example quote.</b> This is a sample building run earlier. Add your own photos on the left and press Count.</div>` : ""}
+    <div class="panel">
+      <div class="quotehead">
+        <div><div class="who">${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</div>
+          <h1>${esc(q.name || "Untitled building")}</h1></div>
+        <div class="total"><div class="k">Building quote</div><div class="v num">${money(quoteTotal())}</div></div>
+      </div>
+      <div class="stats">
+        <span><b class="num">${quoteWindows()}</b> windows</span>
+        <span><b class="num">${Math.max(...sides.map(s => floorsOf(s).length))}</b> floors</span>
+        <span><b class="num">${sides.length}</b> side${sides.length > 1 ? "s" : ""}</span>
+        ${checks ? `<span class="pill warn">${checks} floor${checks > 1 ? "s" : ""} to check</span>` : `<span class="pill ok">Nothing flagged</span>`}
+        ${quoteEdited() ? `<span class="pill edit">Adjusted by hand</span>` : ""}
+        <span>counted in <b class="num">${q.seconds.toFixed(1)}s</b></span>
+      </div>
+      <div class="tabs" role="tablist">
+        ${tabs.map(t => `<button class="tab ${t === S.tab ? "on" : ""}" role="tab" aria-selected="${t === S.tab}" data-t="${t}">
+          ${t === "Summary" ? "Summary" : `${t}<span class="amt num">${money(sideTotal(t))}</span>${floorsOf(t).some(f => f.check) ? '<span class="wdot" title="Has floors to check"></span>' : ""}`}</button>`).join("")}
+      </div>
+      <div id="tabbody"></div>
+    </div>`;
+  w.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => { S.tab = b.dataset.t; renderWork(); }));
+  S.tab === "Summary" ? renderSummary() : renderSide(S.tab);
+}
+
+function renderSide(side) {
+  const q = S.quote.sides[side], lines = floorsOf(side), checks = lines.filter(f => f.check).length;
+  $("tabbody").innerHTML = `
+    <div class="sidegrid">
+      <div class="viewer">
+        <div class="canvaswrap"><canvas id="cv" role="img" aria-label="${side} photo with each window boxed and coloured by floor"></canvas></div>
+        <div class="legend">
+          <span><i style="border-color:var(--accent)"></i>Counted window</span>
+          <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
+          <span><i style="border-color:#FF5050;border-style:dashed"></i>Removed by you</span>
+          <span>Click any box to remove it or bring it back.</span>
+        </div>
+      </div>
+      <div class="floors">
+        <h3>${side}</h3>
+        <div>${lines.slice().reverse().map(f => `
+          <div class="frow">
+            <span class="sw" style="background:${colour(f.floor)}"></span>
+            <div><div class="nm">Floor ${f.floor} ${f.check ? '<span class="pill warn">check</span>' : ""}</div>
+              <div class="sub num">${money(f.each)} each${f.windows !== f.detected ? ` · detected ${f.detected}` : ""}</div></div>
+            <div class="step"><button type="button" data-f="${f.floor}" data-d="-1" aria-label="One fewer window on floor ${f.floor}">−</button>
+              <output class="num">${f.windows}</output>
+              <button type="button" data-f="${f.floor}" data-d="1" aria-label="One more window on floor ${f.floor}">+</button></div>
+            <div class="amt num">${money(f.subtotal)}</div>
+          </div>`).join("")}</div>
+        <button class="linkbtn" id="addfloor" type="button">+ Add a floor it missed</button>
+        <div class="fsum"><span>${sideWindows(side)} windows</span><b class="num">${money(sideTotal(side))}</b></div>
+        ${checks ? `<div class="hint warn">${checks} floor${checks > 1 ? "s have" : " has"} a window the detector wasn't sure about (amber). Look at those before sending.</div>` : ""}
+        ${q.res.note ? `<div class="hint">${esc(q.res.note)}</div>` : ""}
+        ${lines.some(f => f.edited) ? `<button class="linkbtn" id="undo" type="button">Undo my changes on this side</button>` : ""}
+      </div>
+    </div>`;
+  const cv = $("cv"); draw(cv, side); cv.addEventListener("click", e => onCanvasClick(e, side));
+  $("tabbody").querySelectorAll(".step button").forEach(b => b.addEventListener("click", () => {
+    const f = +b.dataset.f, d = +b.dataset.d, line = floorsOf(side).find(l => l.floor === f);
+    if (d < 0 && line.windows === 0) return;
+    q.adjust[f] = (q.adjust[f] || 0) + d; renderWork();
+  }));
+  $("addfloor").addEventListener("click", () => { q.extra++; q.adjust[q.res.n_floors + q.extra] = 1; renderWork(); });
+  $("undo")?.addEventListener("click", () => { q.removed.clear(); q.adjust = {}; q.extra = 0; renderWork(); toast("Back to the detected counts"); });
+}
+
+function summaryRows() {
+  const sides = Object.keys(S.quote.sides), n = Math.max(...sides.map(s => floorsOf(s).length));
+  const rows = [];
+  for (let f = n; f >= 1; f--) {
+    const per = sides.map(s => floorsOf(s).find(l => l.floor === f)?.windows ?? 0), w = per.reduce((a, b) => a + b, 0);
+    rows.push({ floor: f, each: rate(f), per, windows: w, subtotal: w * rate(f) });
+  }
+  return { sides, rows };
+}
+
+function summaryTable({ sides, rows }) {
+  return `<table>
+    <thead><tr><th>Floor</th><th>Per window</th>${sides.map(s => `<th>${s}</th>`).join("")}<th>Windows</th><th>Subtotal</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td>Floor ${r.floor}</td><td class="num">${money(r.each)}</td>${r.per.map(v => `<td class="num">${v}</td>`).join("")}
+      <td class="num">${r.windows}</td><td class="num">${money(r.subtotal)}</td></tr>`).join("")}</tbody>
+    <tfoot><tr><td>Total</td><td></td>${sides.map(s => `<td class="num">${sideWindows(s)}</td>`).join("")}
+      <td class="num">${quoteWindows()}</td><td class="num">${money(quoteTotal())}</td></tr></tfoot></table>`;
+}
+
+function quoteText() {
+  const { sides, rows } = summaryRows();
+  return [`Window cleaning quote: ${S.quote.name || "Untitled building"}`, `Sides: ${sides.join(", ")}`, "",
+    ...rows.filter(r => r.windows).map(r => `Floor ${r.floor}: ${r.windows} windows x ${money(r.each)} = ${money(r.subtotal)}`),
+    "", `Total: ${quoteWindows()} windows, ${money(quoteTotal())}`].join("\n");
+}
+
+function renderSummary() {
+  const data = summaryRows();
+  $("tabbody").innerHTML = `<div class="summary">
+    <div class="tablewrap">${summaryTable(data)}</div>
+    <div class="actions">
+      <button class="btn" id="print" type="button">Print or save as PDF</button>
+      <button class="btn ghost" id="copy" type="button">Copy as text</button>
+      <button class="btn ghost" id="csv" type="button">Download CSV</button>
+    </div></div>`;
+  $("print").addEventListener("click", () => {
+    $("printsheet").innerHTML = `<h1>Window cleaning quote</h1>
+      <p><b>${esc(S.quote.name || "Untitled building")}</b><br>${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</p>
+      ${summaryTable(data)}<p class="big">${money(quoteTotal())}</p>`;
+    window.print();
+  });
+  $("copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(quoteText()); toast("Quote copied"); }
+    catch { toast("Couldn't reach the clipboard. Use the CSV instead."); }
+  });
+  $("csv").addEventListener("click", () => {
+    const { sides, rows } = data;
+    const L = [["Floor", "Per window", ...sides, "Windows", "Subtotal"], ...rows.map(r => [r.floor, r.each, ...r.per, r.windows, r.subtotal]),
+               ["Total", "", ...sides.map(sideWindows), quoteWindows(), quoteTotal()]];
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([L.map(l => l.join(",")).join("\n")], { type: "text/csv" }));
+    a.download = ((S.quote.name || "window-quote").replace(/[^\w-]+/g, "-")) + ".csv"; a.click();
+  });
+}
+
+/* ================= theme + startup ================= */
+function applyTheme(t) {
+  if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  const dark = t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  $("theme").textContent = dark ? "Light" : "Dark";
+}
+$("theme").addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const next = dark ? "light" : "dark"; applyTheme(next);
+  try { localStorage.setItem("wq-theme", next); } catch {}
+});
+$("newq").addEventListener("click", async () => {
+  for (const s of SIDES) await setPhoto(s, null, true);
+  S.quote = null; $("bname").value = ""; refreshRun(); renderWork(); $("bname").focus();
+});
+["base", "mult"].forEach(id => $(id).addEventListener("input", renderWork));
+$("thresh").addEventListener("input", () => $("threshV").textContent = (+$("thresh").value).toFixed(2));
+$("go").addEventListener("click", run);
+
+(async function start() {
+  try { applyTheme(localStorage.getItem("wq-theme")); } catch { applyTheme(null); }
+  buildSlots(); refreshRun();
+  // Open on a finished example so the first look shows what it does. It is labelled as an example.
+  try {
+    const ex = await (await fetch("photos/example.json")).json();
+    const img = new Image(); img.src = ex.photo; await img.decode();
+    S.quote = { name: "Example: townhouse with dormers", sides: { Front: { res: ex, img, removed: new Set(), adjust: {}, extra: 0 } },
+                seconds: ex.seconds, example: true };
+    S.tab = "Front";
+  } catch {}
+  renderWork();
+})();
+</script>
+</body>
+</html>

@@ -1,5 +1,3 @@
-streamlit>=1.40
 requests
 numpy
-pandas
 pillow

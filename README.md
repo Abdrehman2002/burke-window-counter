@@ -5,19 +5,40 @@ floor, and adds up each side and the whole building.
 
 Default pricing: **floor n = $3 × 2^(n−1)** per window ($3, $6, $12, $24 …). Both numbers can be changed in the sidebar.
 
-## Run it
+## Deploy on Vercel
+
+1. In Vercel: **Add New → Project → Import** `burke-window-counter` from GitHub. Leave Framework Preset as **Other**, with no build command.
+2. **Settings → Environment Variables:** add `ROBOFLOW_API_KEY` and `OPENAI_API_KEY`, and optionally `GEMINI_API_KEY`.
+3. Deploy. Every push to `main` redeploys automatically.
+
+Check the keys are loaded: `GET /api/count` returns `{"keys": {...: true}}`.
+
+| Part | File |
+|---|---|
+| The dashboard (static page, pricing and editing run in the browser) | `index.html` |
+| Counting API: one call per side, sides run in parallel | `api/count.py` → `api/_core.py` |
+| Function limits | `vercel.json` (60s max per side; a side usually takes 5 to 12s) |
+
+Photos are shrunk to 1600px in the browser before upload, which keeps them under Vercel's 4.5MB request limit.
+
+## Run it locally
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env        # then fill in the keys
-streamlit run app.py
+python dev_server.py 3000   # same page and API as Vercel, at http://localhost:3000
 ```
 
-Command line, one photo:
+Command line, one photo: `python counter.py photos/06_apt_karlsruhe.jpg`
+There's also an older Streamlit version: `pip install -r requirements-local.txt && streamlit run app.py`
 
-```bash
-python counter.py photos/06_apt_karlsruhe.jpg
-```
+## Using the dashboard
+
+- Add a photo for each side (Front is enough), or load a sample building.
+- **Click a box on the photo to remove it** if it isn't a window. Click it again to bring it back.
+- Use **+ / −** on a floor to fix its count, and **Add a floor it missed** if a whole floor was skipped.
+- Amber boxes and **check** tags mark windows the detector was unsure about.
+- The **Summary** tab has the floors-by-sides table, print / save as PDF, copy as text, and CSV.
 
 ## How it works
 

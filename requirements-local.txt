@@ -1,0 +1,4 @@
+# Local Streamlit dashboard only (the Vercel site does not need these)
+-r requirements.txt
+streamlit>=1.40
+pandas

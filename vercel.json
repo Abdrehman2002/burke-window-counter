@@ -1,0 +1,5 @@
+{
+  "functions": {
+    "api/count.py": { "maxDuration": 60 }
+  }
+}
