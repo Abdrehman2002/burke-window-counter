@@ -47,6 +47,10 @@ class Box:
     conf: float
     floor: int = 0
     edge: bool = False  # cut off by the left/right edge of the photo: almost always the building next door
+    other_side: bool = False  # not on the one wall this photo is quoting (a second side, or next door)
+
+    @property
+    def counted(self): return not (self.edge or self.other_side)
 
     @property
     def w(self): return self.x1 - self.x0
@@ -146,9 +150,37 @@ def _inter(a: Box, b: Box) -> float:
     return max(iw, 0) * max(ih, 0)
 
 
+def _iou(a: Box, b: Box) -> float:
+    i = _inter(a, b)
+    return i / (a.area + b.area - i) if i else 0.0
+
+
 def clean(boxes: list[Box]) -> list[Box]:
-    """Drop duplicates and boxes that sit inside a bigger one (a pane inside its window)."""
-    boxes = sorted(boxes, key=lambda b: b.area, reverse=True)
+    """Sort out overlapping boxes so each real window is counted once.
+
+    - A big box around two or more window-sized boxes is a GROUP (a pair of windows boxed together):
+      drop the big one, keep the windows.
+    - A small box inside a bigger one is a PANE or a duplicate: keep the big one.
+    - Two boxes that half-overlap are the same window seen twice: keep the more confident one.
+    """
+    boxes = [b for b in boxes if b.area > 0]
+    if not boxes:
+        return []
+    typical = float(np.median([b.area for b in boxes]))
+    groups = set()
+    for i, big in enumerate(boxes):
+        inside = [s for j, s in enumerate(boxes) if j != i and s.area < big.area and _inter(s, big) / s.area > 0.6]
+        window_sized = [s for s in inside if s.area > 0.45 * typical]
+        if len(window_sized) >= 2 and big.area > 1.6 * typical:
+            groups.add(i)
+    boxes = [b for i, b in enumerate(boxes) if i not in groups]
+    # same window detected twice, partly offset
+    boxes.sort(key=lambda b: b.conf, reverse=True)
+    deduped: list[Box] = []
+    for b in boxes:
+        if all(_iou(b, k) < 0.35 for k in deduped):
+            deduped.append(b)
+    boxes = sorted(deduped, key=lambda b: b.area, reverse=True)
     kept: list[Box] = []
     for b in boxes:
         if b.area <= 0:
@@ -221,70 +253,90 @@ def assign_floors(boxes: list[Box]) -> int:
     return len(rows)
 
 
-def assign_floors_geometric(boxes: list[Box], k=0.9) -> int:
-    """Looser rule: sort by vertical centre, start a new floor when the jump from the previous
-    window's centre exceeds k x the median window height. Bottom row = floor 1."""
-    if not boxes:
-        return 0
-    med_h = float(np.median([b.h for b in boxes]))
-    order = sorted(boxes, key=lambda b: b.cy, reverse=True)  # bottom first
-    floor = 1
-    order[0].floor = 1
-    for prev, b in zip(order, order[1:]):
-        if prev.cy - b.cy > k * med_h:
-            floor += 1
-        b.floor = floor
-    return floor
-
-
-def _numbered(img: Image.Image, boxes: list[Box]) -> Image.Image:
-    out = img.convert("RGB").copy()
-    d = ImageDraw.Draw(out)
-    f = _font(max(14, img.width // 70))
-    for i, b in enumerate(boxes):
-        d.rectangle([b.x0, b.y0, b.x1, b.y1], outline=(255, 0, 0), width=max(2, img.width // 600))
-        d.rectangle([b.x0, b.y0, b.x0 + f.size * 1.6, b.y0 + f.size + 4], fill=(255, 0, 0))
-        d.text((b.x0 + 2, b.y0 + 1), str(i), font=f, fill=(255, 255, 255))
-    return out
-
-
-def _enforce_same_level(boxes: list[Box], min_overlap=0.6):
-    """Geometry guard on the model's answer: two windows whose heights mostly overlap are on the
-    same floor, whatever the model said. Each group takes its most common floor (ties go lower)."""
-    parent = list(range(len(boxes)))
+def build_rows(boxes: list[Box], min_overlap=0.5) -> list[list[Box]]:
+    """Windows on the same storey form a row. Each window links only to its BEST neighbour on each side:
+    the box beside it whose height range overlaps its own the most. A row that slopes (a photo looking
+    up at a tall building) still chains along itself, but can't jump diagonally to the next storey.
+    Pure geometry, so the same photo always gives the same rows. Returned bottom row first."""
+    n = len(boxes)
+    parent = list(range(n))
 
     def find(i):
         while parent[i] != i:
             parent[i] = parent[parent[i]]
             i = parent[i]
         return i
+
+    def overlap(a: Box, c: Box) -> float:
+        return (min(a.y1, c.y1) - max(a.y0, c.y0)) / min(a.h, c.h)
+
     for i, a in enumerate(boxes):
-        for j in range(i + 1, len(boxes)):
-            b = boxes[j]
-            ov = min(a.y1, b.y1) - max(a.y0, b.y0)
-            if ov > min_overlap * min(a.h, b.h):
-                parent[find(i)] = find(j)
+        acx = (a.x0 + a.x1) / 2
+        for side in (-1, 1):
+            best, best_score = -1, min_overlap
+            for j, c in enumerate(boxes):
+                if j == i or side * ((c.x0 + c.x1) / 2 - acx) <= 0:
+                    continue
+                ov = overlap(a, c)
+                if ov <= min_overlap:
+                    continue
+                # prefer the most level neighbour, then the closest one
+                score = ov - 0.02 * abs((c.x0 + c.x1) / 2 - acx) / max(a.w, 1)
+                if score > best_score:
+                    best, best_score = j, score
+            if best >= 0:
+                parent[find(i)] = find(best)
     groups: dict[int, list[Box]] = {}
     for i, b in enumerate(boxes):
         groups.setdefault(find(i), []).append(b)
-    for g in groups.values():
-        votes: dict[int, int] = {}
-        for b in g:
-            votes[b.floor] = votes.get(b.floor, 0) + 1
-        best = min(votes, key=lambda f: (-votes[f], f))
-        for b in g:
-            b.floor = best
+    return sorted(groups.values(), key=lambda row: np.median([b.cy for b in row]), reverse=True)
 
 
-STOREY_PROMPT = (
-    "This photo shows a building with numbered red boxes drawn on its windows. "
-    "For EVERY numbered box, say which storey of the building it is on: 1 = ground floor, 2 = the floor "
-    "above, and so on. Windows in a gable, dormer or turret top count as the storey they sit at. "
-    "Use the building's real floor levels, not the size of the window: a small window and a tall bay "
-    "window on the same level are the same storey. The MAIN building is the one the photo is centred on. "
-    "Any box on a different building, even one attached to it on the left or right, gets storey 0, and so "
-    "does anything that is not a window (a car, a sign, a door). "
-    'Boxes are numbered 0 to {last}. Return JSON only: {{"storeys": {{"0": 1, "1": 2, ...}}}}')
+def _rows_picture(img: Image.Image, rows: list[list[Box]]) -> Image.Image:
+    """The photo with each row's windows outlined in its own colour and a big R1, R2... label beside it."""
+    out = img.convert("RGB").copy()
+    d = ImageDraw.Draw(out)
+    f = _font(max(18, img.width // 45))
+    lw = max(3, img.width // 400)
+    for k, row in enumerate(rows):
+        col = FLOOR_COLOURS[k % len(FLOOR_COLOURS)]
+        for b in row:
+            d.rectangle([b.x0, b.y0, b.x1, b.y1], outline=col, width=lw)
+        x = min(b.x0 for b in row)
+        y = float(np.median([b.cy for b in row])) - f.size / 2
+        label = f"R{k + 1}"
+        tw = d.textlength(label, font=f)
+        lx = max(0, x - tw - 14)
+        d.rectangle([lx, y - 3, lx + tw + 10, y + f.size + 5], fill=col)
+        d.text((lx + 5, y), label, font=f, fill=(255, 255, 255))
+    # vertical grid 0..10 so the model can say where the wall starts and ends without guessing pixels
+    W, H = out.size
+    g = _font(max(16, img.width // 55))
+    for k in range(11):
+        x = min(W - 2, k * W / 10)
+        d.line([(x, 0), (x, H)], fill=(255, 255, 0), width=max(2, W // 700))
+        t = str(k)
+        tw = d.textlength(t, font=g)
+        tx = min(max(0, x - tw / 2), W - tw - 8)
+        d.rectangle([tx - 4, 2, tx + tw + 4, g.size + 8], fill=(0, 0, 0))
+        d.text((tx, 4), t, font=g, fill=(255, 255, 0))
+    return out
+
+
+ROWS_PROMPT = (
+    "This photo is meant to show ONE side of a building for a window-cleaning quote. Its windows have been "
+    "grouped into horizontal rows by height; each row's windows are outlined in one colour and labelled "
+    "R1, R2 ... from the BOTTOM up. Yellow vertical lines numbered 0 to 10 mark positions across the photo. "
+    "1) SIDE: which part of the photo is the one wall being quoted, meaning the wall that faces the camera "
+    "most directly? Give the grid positions where it starts and ends. If the photo is taken at a corner and "
+    "shows a second wall going off at an angle, leave that second wall out. Leave out separate buildings "
+    "next door. Attached rowhouses or townhouses sharing one continuous front wall are ONE side, so include "
+    "all of them. If the whole photo is one wall, answer 0 and 10. "
+    "2) STOREYS: for each row, which storey of that wall is it on? Storey 1 is the lowest level with windows. "
+    "Rows on the same level are the same storey (a small window and a tall bay window beside it, a porch "
+    "window and a main window). A dormer, gable or turret-top window is on the storey it sits at. A higher row "
+    "is never on a lower storey than a row below it. Rows: {rows}. "
+    'Return JSON only: {{"side_from": 0, "side_to": 10, "storeys": {{"R1": 1, "R2": 2}}}}')
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
 
@@ -294,7 +346,7 @@ def _openai_json(img: Image.Image, prompt: str, model=OPENAI_MODEL, timeout=90) 
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
         json={"model": model,
-              "reasoning_effort": "low",
+              "reasoning_effort": os.environ.get("OPENAI_EFFORT", "low"),
               "response_format": {"type": "json_object"},
               "messages": [{"role": "user", "content": [
                   {"type": "text", "text": prompt},
@@ -305,26 +357,49 @@ def _openai_json(img: Image.Image, prompt: str, model=OPENAI_MODEL, timeout=90) 
     return r.json()["choices"][0]["message"]["content"]
 
 
+def _set_floors(rows: list[list[Box]], storeys: list[int]) -> int:
+    """Apply one storey per row, never going down as rows go up, then renumber 1..n using ONLY levels
+    that have a counted window. A level whose windows are all on another wall or next door is not a floor
+    of this side; if one of those windows is clicked back in, it joins the nearest floor at or below it."""
+    fixed, cur = [], 1
+    for s in storeys:
+        cur = max(cur, int(s) if s else cur)
+        fixed.append(cur)
+    levels = sorted({lvl for row, lvl in zip(rows, fixed) if any(b.counted for b in row)}) or sorted(set(fixed))
+    remap = {old: new for new, old in enumerate(levels, start=1)}
+    for row, lvl in zip(rows, fixed):
+        at_or_below = [l for l in levels if l <= lvl]
+        target = at_or_below[-1] if at_or_below else levels[0]
+        for b in row:
+            b.floor = remap[target]
+    return len(levels)
+
+
 def assign_floors_llm(img: Image.Image, boxes: list[Box], provider="openai") -> int:
-    """Ask a vision model which storey each numbered box sits on. It classifies boxes the detector
-    already found; it does not count anything, which is the job vision chatbots are bad at.
-    Also drops anything it says is not a window on the main building (storey 0)."""
+    """Geometry makes the rows; a vision model answers two small questions: which part of the photo is the
+    one wall being quoted, and which storey each ROW is on. It never deletes or adds a window: windows off
+    that wall are only marked other_side, and a click brings any of them back."""
     if not boxes:
         return 0
-    prompt = STOREY_PROMPT.format(last=len(boxes) - 1)
-    picture = _numbered(img, boxes)
+    rows = build_rows(boxes)
+    prompt = ROWS_PROMPT.format(rows=", ".join(f"R{k + 1}" for k in range(len(rows))))
+    picture = _rows_picture(img, rows)
     text = _openai_json(picture, prompt) if provider == "openai" else _gemini_json(GEMINI_MODEL, picture, prompt)
-    storeys = json.loads(text)["storeys"]
-    for i, b in enumerate(boxes):
-        b.floor = int(storeys.get(str(i), 0))
-    boxes[:] = [b for b in boxes if b.floor > 0]
-    _enforce_same_level(boxes)
-    # renumber so there are no empty storeys in between (e.g. 1, 2, 4 -> 1, 2, 3)
-    levels = sorted({b.floor for b in boxes})
-    remap = {old: new for new, old in enumerate(levels, start=1)}
+    ans = json.loads(text)
+    lo = min(max(float(ans.get("side_from", 0)), 0), 10) / 10 * img.width
+    hi = min(max(float(ans.get("side_to", 10)), 0), 10) / 10 * img.width
+    if hi - lo < 0.15 * img.width:  # an implausibly narrow answer: ignore it rather than drop most windows
+        lo, hi = 0, img.width
     for b in boxes:
-        b.floor = remap[b.floor]
-    return len(levels)
+        cx = (b.x0 + b.x1) / 2
+        b.other_side = bool(cx < lo or cx > hi)
+    return _set_floors(rows, [ans.get("storeys", {}).get(f"R{k + 1}", 0) for k in range(len(rows))])
+
+
+def assign_floors_rows(boxes: list[Box]) -> int:
+    """No-AI fallback: every row is its own storey."""
+    rows = build_rows(boxes)
+    return _set_floors(rows, list(range(1, len(rows) + 1))) if rows else 0
 
 
 # ---------- 3. price ----------
@@ -358,7 +433,7 @@ class SideResult:
 def price(boxes: list[Box], n_floors: int, base=BASE_PRICE, mult=MULTIPLIER) -> list[FloorLine]:
     lines = []
     for n in range(1, n_floors + 1):
-        fb = [b for b in boxes if b.floor == n and not b.edge]
+        fb = [b for b in boxes if b.floor == n and b.counted]
         each = base * mult ** (n - 1)
         lines.append(FloorLine(n, len(fb), each, len(fb) * each, any(b.conf < CHECK_BELOW for b in fb)))
     return lines
@@ -386,9 +461,9 @@ def draw(img: Image.Image, res: SideResult) -> Image.Image:
         fb = [b for b in res.boxes if b.floor == fl.floor]
         if not fb:
             continue
-        for b in [b for b in fb if b.edge]:  # not counted: dashed white
+        for b in [b for b in fb if not b.counted]:  # not counted: thin white
             od.rectangle([b.x0, b.y0, b.x1, b.y1], outline=(255, 255, 255, 200), width=lw)
-        fb = [b for b in fb if not b.edge]
+        fb = [b for b in fb if b.counted]
         if not fb:
             continue
         col = FLOOR_COLOURS[(fl.floor - 1) % len(FLOOR_COLOURS)]
@@ -418,6 +493,11 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
              base=BASE_PRICE, mult=MULTIPLIER, floors="ai") -> SideResult:
     raw = detect_sam3(img, thresh) if detector == "sam3" else detect_gemini(img)
     boxes = clean(raw)
+    # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time
+    # (the photo is meant to frame the whole side). Kept and drawn, but not counted unless clicked back.
+    W = img.width
+    for b in boxes:
+        b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
     res_note = ""
     if floors == "ai":
         n = None
@@ -431,16 +511,11 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
                 res_note += f"{provider} floors failed ({str(e)[:80]}). "
         if n is None:
             res_note += "Used geometric floors."
-            n = assign_floors_geometric(boxes)
+            n = assign_floors_rows(boxes)
     elif floors == "geometric":
-        n = assign_floors_geometric(boxes)
+        n = assign_floors_rows(boxes)
     else:
         n = assign_floors(boxes)
-    # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time
-    # (the photo is meant to frame the whole side). Kept and drawn, but not counted unless someone adds it back.
-    W = img.width
-    for b in boxes:
-        b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
     res = SideResult(name, boxes)
     res.note = res_note
     res.floors = price(boxes, n, base, mult)

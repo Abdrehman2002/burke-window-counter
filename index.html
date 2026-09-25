@@ -336,7 +336,10 @@ function buildSlots() {
   for (const s of SIDES) {
     const el = $("slot-" + s), input = $("file-" + s);
     el.querySelector(".pick").addEventListener("click", () => input.click());
-    input.addEventListener("change", () => { if (input.files[0]) setPhoto(s, input.files[0]); input.value = ""; });
+    input.addEventListener("change", () => {
+      if (input.files[0]) { if ($("bname").dataset.auto) { $("bname").value = ""; delete $("bname").dataset.auto; } setPhoto(s, input.files[0]); }
+      input.value = "";
+    });
     el.querySelector(".rm").addEventListener("click", () => setPhoto(s, null));
     el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("drag"); });
     el.addEventListener("dragleave", () => el.classList.remove("drag"));
@@ -426,8 +429,10 @@ async function run() {
   renderWork();
 }
 
-// Windows cut off by the photo's edge start out not counted (dashed); a click brings one back.
-const edgeSet = r => new Set(r.boxes.map((b, i) => b.edge ? i : -1).filter(i => i >= 0));
+// Windows cut off by the photo's edge, or on a wall other than the one this photo quotes, start out
+// not counted (dashed); a click brings one back.
+const skipped = b => !!(b.edge || b.other_side);
+const edgeSet = r => new Set(r.boxes.map((b, i) => skipped(b) ? i : -1).filter(i => i >= 0));
 
 /* ================= quote maths (all in the browser, so it's instant) ================= */
 function floorsOf(side) {
@@ -438,7 +443,7 @@ function floorsOf(side) {
     const adj = q.adjust[f] || 0;
     const windows = Math.max(0, kept.length + adj);
     lines.push({ floor: f, detected: idx.length, windows, each: rate(f), subtotal: windows * rate(f),
-                 edited: adj !== 0 || f > q.res.n_floors || idx.some(i => q.removed.has(i) !== !!q.res.boxes[i].edge),
+                 edited: adj !== 0 || f > q.res.n_floors || idx.some(i => q.removed.has(i) !== skipped(q.res.boxes[i])),
                  check: kept.some(i => q.res.boxes[i].conf < CHECK_BELOW) });
   }
   return lines;
@@ -557,7 +562,7 @@ function renderSide(side) {
         <div class="legend">
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
           <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
-          <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (cut off at the edge, or removed)</span>
+          <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (another side, next door, or removed)</span>
           <span>Click any box to remove it or bring it back.</span>
         </div>
       </div>
