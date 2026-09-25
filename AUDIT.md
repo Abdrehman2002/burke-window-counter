@@ -91,6 +91,22 @@ office, Harmony Hills school, Seneca 506 upper floor, Fredrich upper floor).
 | C5 | **Divided-lite and transom panes counted as separate windows** | c05b transom row counted as 20 | Each pane detected | Depends on Burke's pane-vs-window answer; merge panes in one frame if he says "per window" |
 | C6 | **Default building pick is sometimes wrong** | c06a picked a 4-window strip, not the main building | Default = most windows | Default = the building nearest the photo centre and largest in area |
 
+### Fixes for C2, C3, C4, C5 (2026-09-26)
+
+House benchmark unchanged at 83% after all of them.
+
+| # | Fix | Before → after |
+|---|---|---|
+| C2 corners | A corner is the building outline's top point, confirmed by row slopes flipping sign across it (>16°). Floors are computed per wall | Otis hotel: 50 windows zig-zagging on "floor 3" → **wall B 13·13·13·13, wall A 8·7·7·9** (correct) |
+| C2 towers | Count floors up each column (one window per floor per column), used only when row matching finds under half the floors | Doubletree: 3 floors → **16 levels of ~8–13** (tower ≈ 15 storeys + podium) |
+| C3 glass walls | A separate SAM 3 "glass curtain wall" outline, accepted only when ≥4× a window's height and ≥38% of its building (shop fronts measured 1.2–3.2×). Panels counted from the frame grid, strip by strip. Each glass wall is its own item with its own rows, always flagged "check" | Rockville glass offices: 0 → **3 glass walls, e.g. 5 rows × 10 panels**. Hallidie: grid of ~20 per row. Shop fronts untouched |
+| C5 panes | A wide, short band (≥3.5:1) whose lights cover ≥80% of its width is one divided window (transom/ribbon). `COUNT_PANES=1` counts every pane | Cheese Store transoms: 20 → **1 per band** (floor 1: 3); house triples unchanged |
+| C4 far shots | Zoom-and-detect-again on small buildings. **Measured no gain** (the tiled pass already sees them), so off by default (`ZOOM_BELOW`). The strip mall's real problem is shop glass (C1) | Strip mall still 0 |
+
+**Still open:** C1 shop-front glass (low detector confidence; needs Burke's pricing rule), C6 default
+building pick. Glass-wall panel *rows* are not always storeys (glass can have 2 rows per floor), so
+glass walls are always flagged for a check.
+
 ## P1: accuracy (the product is only as good as this)
 
 Ranked by how much they move the count per hour of work:

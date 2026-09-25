@@ -3,6 +3,9 @@
 Primary customer: **Burke Allen**, owner of a US window-cleaning business. He came in from LinkedIn and
 asked for a demo video before any call. He had already tried to do this with AI himself and failed.
 
+**Building mix (Abdur, 2026-09-26): mostly commercial** (offices, retail and storefronts, mid-rise,
+strip malls). Houses are the minority case. Accuracy work and the benchmark must weight commercial facades.
+
 ## Job Statement
 > **When I'm quoting a building I haven't cleaned before, I want to know how many windows are on each
 > floor and what that comes to at my per-floor rates, so I can give the customer a firm price on the

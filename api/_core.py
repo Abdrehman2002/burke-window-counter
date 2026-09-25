@@ -72,6 +72,7 @@ class Box:
     other_side: bool = False  # not on the one wall this photo is quoting (a second side, or next door)
     weak: bool = False  # the detector was under WEAK_BELOW sure: shown as a suggestion, not counted
     region: int = 0  # which building / wall of the photo this window belongs to (see Region)
+    group: int = -1  # glass-wall index for curtain-wall panels (-1 for ordinary windows)
     kind: str = "window"  # which prompt found it: "window", a glass-door prompt, or "door" (solid door, not counted)
 
     @property
@@ -288,12 +289,20 @@ def clean(boxes: list[Box]) -> list[Box]:
     # "A normal window's size" comes from confident boxes only; low-confidence specks would shrink it.
     sure = [b.area for b in boxes if b.conf >= 0.5] or [b.area for b in boxes]
     typical = float(np.median(sure))
-    groups = set()
+    groups, divided = set(), set()
     for i, big in enumerate(boxes):
         inside = [s for j, s in enumerate(boxes) if j != i and s.area < big.area and _inter(s, big) / s.area > 0.4]
         window_sized = [s for s in inside if s.area > 0.45 * typical]
+        if len(inside) >= 3 and not COUNT_PANES and _is_divided_window(big, inside):
+            divided.add(i)  # one window split into lights: keep the frame, drop the lights
+            continue
         if len(window_sized) >= 2 and big.area > 1.3 * typical:
             groups.add(i)
+    if divided:
+        lights = {j for i in divided for j, s in enumerate(boxes)
+                  if j != i and s.area < boxes[i].area and _inter(s, boxes[i]) / s.area > 0.6}
+        groups |= lights
+        groups -= divided
     boxes = [b for i, b in enumerate(boxes) if i not in groups]
     # same window detected twice, partly offset
     boxes.sort(key=lambda b: b.conf, reverse=True)
@@ -384,6 +393,68 @@ def verify_candidates(img: Image.Image, cands: list[Box], provider="openai"):
         if yes * 2 > len(votes):
             b.weak = False
             b.conf = max(b.conf, CHECK_BELOW if yes == len(votes) else min(b.conf, CHECK_BELOW - 0.01))
+
+
+# Burke's rule is still open: is a window split into small panes one window or several? Default: one
+# window per frame, so a band of small panes in one frame (a transom over a shop front) counts once.
+# COUNT_PANES=1 counts every pane.
+COUNT_PANES = os.environ.get("COUNT_PANES", "0") == "1"
+
+
+def _is_divided_window(big: Box, inside: list[Box]) -> bool:
+    """Does the big box look like ONE window divided into lights, such as a transom or ribbon band over a
+    shop front (at least 3.5 times wider than tall)? The boxes inside it sit in a single row
+    (or a single column) and, together, cover nearly its whole width (or height): only thin mullions
+    between them. Separate windows boxed together have real wall between them."""
+    if big.w < 3.5 * big.h:
+        return False  # a mulled pair or triple of ordinary windows is not a band; only wide, short bands merge
+    row = [s for s in inside if (min(s.y1, big.y1) - max(s.y0, big.y0)) > 0.7 * s.h]
+    if len(row) >= 3:
+        xs = sorted((max(s.x0, big.x0), min(s.x1, big.x1)) for s in row)
+        covered, cur0, cur1 = 0.0, xs[0][0], xs[0][1]
+        for a, b in xs[1:]:
+            if a <= cur1:
+                cur1 = max(cur1, b)
+            else:
+                covered += cur1 - cur0; cur0, cur1 = a, b
+        covered += cur1 - cur0
+        tall = float(np.median([s.h for s in row]))
+        if covered > 0.8 * big.w and tall > 0.7 * big.h:
+            return True
+    return False
+
+
+def _merge_panes(boxes: list[Box]) -> list[Box]:
+    """Small panes sitting edge to edge in one row (same top and bottom, tiny gaps) are one window divided
+    into lights, not separate windows. Only boxes well under a normal window's size are merged, so two
+    ordinary windows side by side are never joined."""
+    if len(boxes) < 3:
+        return boxes
+    sure = [b.area for b in boxes if b.conf >= 0.5] or [b.area for b in boxes]
+    typical = float(np.median(sure))
+    small = [b for b in boxes if b.area < 0.6 * typical]
+    rest = [b for b in boxes if b.area >= 0.6 * typical]
+    small.sort(key=lambda b: b.x0)
+    used, out = set(), []
+    for i, a in enumerate(small):
+        if i in used:
+            continue
+        group, cur = [a], a
+        used.add(i)
+        for j in range(i + 1, len(small)):
+            if j in used:
+                continue
+            b = small[j]
+            vov = (min(cur.y1, b.y1) - max(cur.y0, b.y0)) / max(1.0, min(cur.h, b.h))
+            gap = b.x0 - cur.x1
+            if vov > 0.8 and -0.3 * cur.w < gap < 0.35 * min(cur.w, b.w) and abs(b.h - cur.h) < 0.3 * max(b.h, cur.h):
+                group.append(b); used.add(j); cur = b
+        if len(group) >= 3:
+            out.append(Box(min(g.x0 for g in group), min(g.y0 for g in group), max(g.x1 for g in group),
+                           max(g.y1 for g in group), float(np.mean([g.conf for g in group]))))
+        else:
+            out.extend(group)
+    return rest + out
 
 
 def _drop_door_lights(windows: list[Box], doors: list[Box]) -> list[Box]:
@@ -497,6 +568,111 @@ def _floor_vanishing_point(boxes: list[Box], pairs) -> np.ndarray | None:
     return vt[-1]
 
 
+def column_rows(boxes: list[Box]) -> list[list[Box]] | None:
+    """Floors for a tall, regular facade, counted up the columns.
+
+    In a photo looking up at a tower the floors don't line up across the picture, but every column of
+    windows still stacks one window per floor. So: link each window to the one directly above it, count
+    steps up each column (a gap of two floors' height is two steps, for a missed window), then line the
+    columns up with each other using windows that sit side by side. Returns rows bottom-first, or None
+    when the facade doesn't have enough columns for this to be reliable."""
+    n = len(boxes)
+    if n < 20:
+        return None
+    cx = [(b.x0 + b.x1) / 2 for b in boxes]
+
+    def xov(a, b):
+        return (min(a.x1, b.x1) - max(a.x0, b.x0)) / max(1.0, min(a.w, b.w))
+
+    up, down = {}, {}
+    for i, a in enumerate(boxes):
+        best, bd = -1, None
+        for j, b in enumerate(boxes):
+            if j == i or b.cy >= a.cy - 0.5 * min(a.h, b.h) or xov(a, b) < 0.45:
+                continue
+            d = a.cy - b.cy
+            if d > 3.5 * max(a.h, b.h):
+                continue
+            if bd is None or d < bd:
+                best, bd = j, d
+        if best >= 0:
+            up[i] = best
+    for i, j in list(up.items()):  # keep a link only when it is also the lower window's nearest from above
+        if j in down and boxes[down[j]].cy < boxes[i].cy:
+            continue
+        down[j] = i
+    up = {i: j for j, i in down.items()}
+    # chains = columns, bottom first
+    starts = [i for i in range(n) if i not in down.values() or i not in up.values()]
+    col_of, cols = {}, []
+    for i in sorted(range(n), key=lambda k: -boxes[k].cy):
+        if i in col_of or i in down.values() and any(u == i for u in up.values()) and False:
+            continue
+        if i in col_of:
+            continue
+        chain, k = [i], i
+        while k in up and up[k] not in col_of and up[k] not in chain:
+            k = up[k]
+            chain.append(k)
+        for k in chain:
+            col_of[k] = len(cols)
+        cols.append(chain)
+    long_cols = [c for c in cols if len(c) >= 4]
+    if len(long_cols) < 3 or sum(len(c) for c in long_cols) < 0.6 * n:
+        return None
+    # steps up each column; a gap of about two pitches means a missed window
+    idx = {}
+    for chain in cols:
+        gaps = [boxes[chain[t]].cy - boxes[chain[t + 1]].cy for t in range(len(chain) - 1)]
+        pitch = float(np.median(gaps)) if gaps else 0
+        level = 0
+        idx[chain[0]] = 0
+        for t, g in enumerate(gaps):
+            level += max(1, int(round(g / pitch))) if pitch > 0 else 1
+            idx[chain[t + 1]] = level
+    # line columns up: votes from windows side by side in different columns
+    votes: dict[tuple, dict] = {}
+    for i, j in _same_floor_pairs(boxes):
+        ci, cj = col_of[i], col_of[j]
+        if ci == cj:
+            continue
+        a, b = boxes[i], boxes[j]
+        ov = (min(a.y1, b.y1) - max(a.y0, b.y0)) / min(a.h, b.h)
+        if ov < 0.6:
+            continue
+        key = (ci, cj)
+        votes.setdefault(key, {})
+        off = idx[i] - idx[j]
+        votes[key][off] = votes[key].get(off, 0) + 1
+    offset = {}
+    order = sorted(range(len(cols)), key=lambda c: -len(cols[c]))
+    offset[order[0]] = 0
+    changed = True
+    while changed:
+        changed = False
+        for (ci, cj), vs in votes.items():
+            off = max(vs, key=lambda k: vs[k])
+            if ci in offset and cj not in offset:
+                offset[cj] = offset[ci] + off
+                changed = True
+            elif cj in offset and ci not in offset:
+                offset[ci] = offset[cj] - off
+                changed = True
+    placed = [k for k in range(n) if col_of[k] in offset]
+    if len(placed) < 0.6 * n:
+        return None
+    level = {k: idx[k] + offset[col_of[k]] for k in placed}
+    for k in range(n):  # columns never linked sideways: hang each window on the nearest placed one by height
+        if k not in level:
+            near = min(placed, key=lambda p: abs(boxes[p].cy - boxes[k].cy) + 0.3 * abs(cx[p] - cx[k]))
+            level[k] = level[near]
+    lo = min(level.values())
+    rows: dict[int, list[Box]] = {}
+    for k in range(n):
+        rows.setdefault(level[k] - lo, []).append(boxes[k])
+    return [rows[key] for key in sorted(rows)]
+
+
 def vp_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
     """Group windows into floors using the wall's own perspective.
 
@@ -603,7 +779,8 @@ def _rows_picture(img: Image.Image, rows: list[list[Box]]) -> Image.Image:
 
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
-AI_REGIONS = 3  # buildings per photo whose storeys the model reads; the rest use geometry
+AI_REGIONS = 3
+COLUMN_FLOORS = os.environ.get("COLUMN_FLOORS", "1") == "1"  # buildings per photo whose storeys the model reads; the rest use geometry
 VOTES = max(1, int(os.environ.get("VOTES", "3")))
 
 
@@ -690,6 +867,12 @@ def floors_for_wall(img: Image.Image, boxes: list[Box], provider="openai") -> tu
             b.floor = 1
         return 0, None
     rows, is_grid = vp_rows(live)
+    if COLUMN_FLOORS:
+        crow = column_rows(live)
+        # Only when matching across rows has clearly failed (far fewer floors than the columns show, as on
+        # a tower photographed from below); on facades where rows work, rows are the more precise method.
+        if crow is not None and len(crow) >= 6 and len(crow) >= 2 * len(rows):
+            rows, is_grid = crow, True
     if len(rows) == 1:
         n = _set_floors(rows, [1])
         seen = None
@@ -858,12 +1041,53 @@ def _clip_x(poly, sx: float, keep_left: bool):
     return out
 
 
-def _split_walls(boxes: list[Box]) -> tuple[list[list[Box]], float | None]:
+def _median_row_angle(bs: list[Box]) -> float | None:
+    """Median slope (degrees) of the lines through side-by-side windows: which way this wall's floors run."""
+    pairs = _same_floor_pairs(bs)
+    if len(pairs) < 3:
+        return None
+    ang = []
+    for i, j in pairs:
+        a, b = bs[i], bs[j]
+        dx = (b.x0 + b.x1) / 2 - (a.x0 + a.x1) / 2
+        if abs(dx) < 1:
+            continue
+        ang.append(np.degrees(np.arctan((b.cy - a.cy) / dx)))
+    return float(np.median(ang)) if len(ang) >= 3 else None
+
+
+def _corner_from_outline(boxes: list[Box], poly) -> float | None:
+    """A corner shot shows the building's nearest vertical edge as the highest point of its outline, with
+    the two walls falling away on each side, so the floors slope in opposite directions left and right of
+    it. Candidate: the outline's top point. Accept it only when each side has 4+ windows and the median
+    row slope flips sign across it by a clear margin."""
+    if not poly or len(poly) < 3:
+        return None
+    P = np.array(poly, dtype=float)
+    x_min, x_max = P[:, 0].min(), P[:, 0].max()
+    tx = float(P[np.argmin(P[:, 1]), 0])
+    if not (x_min + 0.12 * (x_max - x_min) < tx < x_max - 0.12 * (x_max - x_min)):
+        return None
+    left = [b for b in boxes if (b.x0 + b.x1) / 2 < tx]
+    right = [b for b in boxes if (b.x0 + b.x1) / 2 >= tx]
+    if len(left) < 4 or len(right) < 4:
+        return None
+    al, ar = _median_row_angle(left), _median_row_angle(right)
+    if al is None or ar is None:
+        return None
+    if al * ar < 0 and abs(al - ar) > 16:  # a mild flip happens on a straight-on house with a turret
+        return tx
+    return None
+
+
+def _split_walls(boxes: list[Box], poly=None) -> tuple[list[list[Box]], float | None]:
     """Split one building's windows at the corner line, if the photo shows two of its walls."""
     firm = [b for b in boxes if not b.weak] or boxes
     if len(firm) < 8:
         return [boxes], None
-    sx = _corner_x(firm)
+    sx = _corner_from_outline(firm, poly)
+    if sx is None:
+        sx = _corner_x(firm)
     if sx is None:
         return [boxes], None
     left = [b for b in boxes if (b.x0 + b.x1) / 2 < sx]
@@ -882,7 +1106,11 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
         ys, xs = np.nonzero(m[::2, ::2])
         mask_pts.append((xs * 2, ys * 2))
     groups: dict[int, list[Box]] = {}
+    glass: dict[int, list[Box]] = {}
     for b in boxes:
+        if b.kind == "panel":
+            glass.setdefault(b.group, []).append(b)
+            continue
         k = -1
         if masks:
             x = int(((b.x0 + b.x1) / 2) / _RSCALE)
@@ -898,7 +1126,7 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
         groups.setdefault(k, []).append(b)
     regions = []
     for k, bs in groups.items():
-        walls, sx = _split_walls(bs)
+        walls, sx = _split_walls(bs, polys[k] if k >= 0 else None)
         for wi, wall in enumerate(walls):
             if k >= 0:
                 poly = polys[k] if sx is None else _clip_x(polys[k], sx, keep_left=(wi == 0))
@@ -910,6 +1138,11 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
                 poly = _hull(pts)
             regions.append({"boxes": wall, "polygon": [[float(x), float(y)] for x, y in poly],
                             "wall": (wi if len(walls) > 1 else None), "building": k})
+    gpolys = getattr(apply_glass_walls, "polys", [])
+    for gi, bs in glass.items():
+        poly = gpolys[gi] if gi < len(gpolys) else _hull([(x, y) for b in bs for x, y in ((b.x0, b.y0), (b.x1, b.y1))])
+        regions.append({"boxes": bs, "polygon": [[float(x), float(y)] for x, y in poly], "wall": None,
+                        "building": f"glass{gi}", "glass": True})
     regions.sort(key=lambda r: np.median([(b.x0 + b.x1) / 2 for b in r["boxes"]]))
     bnum = {}
     for i, r in enumerate(regions):
@@ -917,9 +1150,16 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
         for b in r["boxes"]:
             b.region = i + 1
     for r in regions:
-        bnum.setdefault(r["building"], len(bnum) + 1)
+        if not r.get("glass"):
+            bnum.setdefault(r["building"], len(bnum) + 1)
     multi_b = len(bnum) > 1
+    gnum = 0
     for r in regions:
+        if r.get("glass"):
+            gnum += 1
+            r["label"] = f"Glass wall {gnum}"
+            r["windows"] = sum(1 for b in r["boxes"] if b.counted)
+            continue
         label = f"Building {bnum[r['building']]}" if multi_b else "Building"
         if r["wall"] is not None:
             label += f", wall {'AB'[r['wall']]}"
@@ -1011,6 +1251,130 @@ def assign_floors_rows(boxes: list[Box]) -> int:
     """No-AI fallback: every row is its own storey."""
     rows, _ = vp_rows(boxes)
     return _set_floors(rows, list(range(1, len(rows) + 1))) if rows else 0
+
+
+# ---------- glass curtain walls ----------
+GLASS_WALLS = os.environ.get("GLASS_WALLS", "1") == "1"
+GLASS_MIN_AREA = 0.02  # glass outlines smaller than this share of the photo are ordinary windows
+
+
+def segment_glass(img: Image.Image) -> list:
+    """SAM 3 "glass curtain wall" outlines (a separate request, so it can't change the window results)."""
+    data = _roboflow_post({"image": {"type": "base64", "value": _jpeg_b64(img)},
+                           "prompts": [{"type": "text", "text": "glass curtain wall"}],
+                           "output_prob_thresh": 0.4, "format": "polygon"})
+    polys = []
+    for p in data["prompt_results"][0]["predictions"]:
+        rings = [m for m in p["masks"] if len(m) >= 3]
+        if rings:
+            ring = max(rings, key=_poly_area)
+            if _poly_area(ring) > GLASS_MIN_AREA * img.width * img.height:
+                polys.append(ring)
+    return polys
+
+
+def _peaks(profile, min_dist, k=1.0):
+    p = np.convolve(profile, np.ones(5) / 5, mode="same")
+    if p.max() <= 0:
+        return []
+    thr = p.mean() + k * p.std()
+    idx = [i for i in range(1, len(p) - 1) if p[i] >= p[i - 1] and p[i] >= p[i + 1] and p[i] > thr]
+    idx.sort(key=lambda i: -p[i])
+    out = []
+    for i in idx:
+        if all(abs(i - j) >= min_dist for j in out):
+            out.append(i)
+    return sorted(out)
+
+
+def glass_grid(img, poly):
+    """Panels of a glass curtain wall, from its frame grid. Inside the glass outline, frame bars are strong
+    straight edges: vertical bars show as peaks in the sideways edge profile, and within each strip
+    between them the horizontal bars show as peaks in the up-down profile (done strip by strip, so
+    floors that slope in perspective are still found). Returns panel boxes."""
+    P = np.array(poly, dtype=float)
+    x0, y0, x1, y1 = [int(v) for v in (P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max())]
+    crop = np.asarray(img.crop((x0, y0, x1, y1)).convert("L"), dtype=float)
+    m = Image.new("L", (x1 - x0, y1 - y0), 0)
+    ImageDraw.Draw(m).polygon([(x - x0, y - y0) for x, y in poly], fill=1)
+    mask = np.asarray(m, dtype=bool)
+    H, W = crop.shape
+    gx = np.abs(np.diff(crop, axis=1)); gy = np.abs(np.diff(crop, axis=0))
+    mx = mask[:, 1:] & mask[:, :-1]; my = mask[1:, :] & mask[:-1, :]
+    colw = np.maximum(mx.sum(0), 1)
+    V = (gx * mx).sum(0) / colw
+    V[mx.sum(0) < 0.3 * H] = 0
+    vx = _peaks(V, max(12, int(0.035 * W)))
+    left, right = np.where(mask.any(0))[0][[0, -1]]
+    bounds = sorted(set([left] + [x for x in vx if left + 6 < x < right - 6] + [right]))
+    panels = []
+    for a, b in zip(bounds, bounds[1:]):
+        if b - a < 8:
+            continue
+        sl = slice(a, b)
+        rowsm = my[:, sl]
+        Hp = (gy[:, sl] * rowsm).sum(1) / np.maximum(rowsm.sum(1), 1)
+        Hp[rowsm.sum(1) < 0.5 * (b - a)] = 0
+        ys = np.where(mask[:, sl].any(1))[0]
+        if not len(ys):
+            continue
+        top, bot = ys[0], ys[-1]
+        hy = _peaks(Hp, max(10, int(0.06 * H)), k=1.3)  # stricter: reflections make weak, close lines
+        yb = sorted(set([top] + [y for y in hy if top + 6 < y < bot - 6] + [bot]))
+        cells = [(t, u) for t, u in zip(yb, yb[1:]) if u - t >= 8 and mask[t:u, sl].mean() >= 0.5]
+        for rank, (t, u) in enumerate(reversed(cells)):  # rank 0 = the bottom row of this strip
+            panels.append((x0 + a, y0 + t, x0 + b, y0 + u, rank))
+    return panels
+
+
+
+def apply_glass_walls(img: Image.Image, boxes: list[Box], glass_polys, building_polys=()) -> tuple[list[Box], int]:
+    """Replace the window boxes inside each glass-wall outline with its frame-grid panels. Panels are marked
+    as a doubtful count (amber), because a curtain wall's panel grid is an estimate.
+
+    SAM 3's "glass curtain wall" also outlines shop fronts, so an outline only counts as a glass wall when
+    it is several storeys tall: at least 4 times a normal window's height (shop fronts measured 1.2-3.2x,
+    real glass walls 4.8x and up) and at least 38% of its building's height."""
+    if not glass_polys:
+        return boxes, 0
+    sure = [b.h for b in boxes if b.conf >= 0.5]
+    win_h = float(np.median(sure)) if len(sure) >= 3 else 0.0
+
+    def host_height(cx, cy):
+        for bp in building_polys:
+            B = np.array(bp, dtype=float)
+            if B[:, 0].min() <= cx <= B[:, 0].max() and B[:, 1].min() <= cy <= B[:, 1].max():
+                return B[:, 1].max() - B[:, 1].min()
+        return None
+    walls = []
+    for p in glass_polys:
+        P = np.array(p, dtype=float)
+        gh = P[:, 1].max() - P[:, 1].min()
+        if win_h and gh < 4 * win_h:
+            continue
+        hh = host_height(P[:, 0].mean(), (P[:, 1].min() + P[:, 1].max()) / 2)
+        if hh and gh < 0.38 * hh:
+            continue
+        walls.append(p)
+    glass_polys = walls
+    if not glass_polys:
+        return boxes, 0
+    masks = [_raster(p, img.size) for p in glass_polys]
+
+    def inside(b):
+        x, y = int(((b.x0 + b.x1) / 2) / _RSCALE), int(b.cy / _RSCALE)
+        return any(0 <= y < m.shape[0] and 0 <= x < m.shape[1] and m[y, x] for m in masks)
+    kept = [b for b in boxes if not inside(b)]
+    panels = []
+    for gi, p in enumerate(glass_polys):
+        for x0, y0, x1, y1, rank in glass_grid(img, p):
+            panels.append(Box(float(x0), float(y0), float(x1), float(y1), CHECK_BELOW - 0.01,
+                              floor=rank + 1, group=gi, kind="panel"))
+    apply_glass_walls.polys = glass_polys
+    return kept + panels, len(panels)
+
+
+apply_glass_walls.polys = []
 
 
 # ---------- 3. price ----------
@@ -1132,6 +1496,44 @@ def draw(img: Image.Image, res: SideResult) -> Image.Image:
 
 # ---------- pipeline ----------
 
+# A building covering less of the photo than this gets a second, zoomed-in look. Tested 2026-09-26 on the
+# far-away shots (strip mall, motel, schools): it found nothing the tiled pass hadn't, so it is off by
+# default (it costs 5 more detector calls). Set ZOOM_BELOW=0.35 to turn it on.
+ZOOM_BELOW = float(os.environ.get("ZOOM_BELOW", "0"))
+
+
+def _zoom_pass(img: Image.Image, polys, raw: list[Box], thresh=0.4) -> list[Box]:
+    """A building shot from far away (a strip mall across a parking lot) is a thin strip of the photo, and
+    its windows are too small for the detector. Crop the biggest building that covers less than ZOOM_BELOW
+    of the photo, with a margin, enlarge it and detect again; boxes are mapped back to the photo."""
+    if not polys or ZOOM_BELOW <= 0 or remaining() < 20:
+        return []
+    W, H = img.size
+    best = None
+    for p in polys:
+        P = np.array(p, dtype=float)
+        x0, y0, x1, y1 = P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()
+        frac = (x1 - x0) * (y1 - y0) / (W * H)
+        if frac < ZOOM_BELOW and (best is None or frac > best[0]) and (x1 - x0) > 0.2 * W:
+            best = (frac, x0, y0, x1, y1)
+    if best is None:
+        return []
+    _, x0, y0, x1, y1 = best
+    mx, my = 0.08 * (x1 - x0), 0.25 * (y1 - y0)
+    box = (int(max(0, x0 - mx)), int(max(0, y0 - my)), int(min(W, x1 + mx)), int(min(H, y1 + my)))
+    crop = img.crop(box)
+    k = 1600 / max(crop.size)
+    if k < 1.3:
+        return []  # not really small: the normal pass already saw it at this size
+    crop = crop.resize((int(crop.width * k), int(crop.height * k)), Image.LANCZOS)
+    try:
+        found = detect_sam3(crop, thresh)
+    except Exception:
+        return []
+    return [Box(box[0] + b.x0 / k, box[1] + b.y0 / k, box[0] + b.x1 / k, box[1] + b.y1 / k, b.conf, kind=b.kind)
+            for b in found]
+
+
 def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
              base=BASE_PRICE, mult=MULTIPLIER, floors="ai") -> SideResult:
     """Windows -> buildings/walls in the photo -> floors worked out separately for each one.
@@ -1142,7 +1544,8 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     from concurrent.futures import ThreadPoolExecutor
     start_budget()
     detect_sam3.failed_tiles = 0
-    with ThreadPoolExecutor(2) as ex:
+    with ThreadPoolExecutor(3) as ex:
+        f_glass = ex.submit(segment_glass, img) if GLASS_WALLS else None
         f_win = ex.submit(lambda: detect_sam3(img, min(thresh, CAND_THRESH) if VERIFY else thresh) if detector == "sam3" else detect_gemini(img))
         f_bld = ex.submit(lambda: segment_buildings(img))
         raw = f_win.result()
@@ -1150,11 +1553,17 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
             polys = f_bld.result()
         except Exception:
             polys = []  # no building outlines: the whole photo is one region
+        try:
+            glass_polys = f_glass.result() if f_glass else []
+        except Exception:
+            glass_polys = []
     doors = [b for b in raw if b.kind == "door"]
     raw = [b for b in raw if b.kind != "door"]
     if doors:
         raw = _drop_door_lights(raw, doors)
+    raw = raw + _zoom_pass(img, polys, raw, thresh)
     boxes = clean(raw)
+    boxes, n_panels = apply_glass_walls(img, boxes, glass_polys, polys)
     if len(boxes) > MAX_BOXES:  # more than any real facade: keep the most confident
         boxes = sorted(boxes, key=lambda b: b.conf, reverse=True)[:MAX_BOXES]
     # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time.
@@ -1184,6 +1593,8 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
 
     def do(region):
         bs = region["boxes"]
+        if region.get("glass"):  # floors come from the glass grid itself (bottom row = floor 1)
+            return max((b.floor for b in bs), default=0), None, ""
         if floors != "ai" or region["id"] not in ai_ids:
             live = [b for b in bs if b.counted]
             n = assign_floors_rows(live) if live else 0
@@ -1222,6 +1633,11 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
         for r in regions:
             r["note"] = (r["note"] + " Part of the photo could not be checked closely, so small windows "
                          "may be missing. Count again, or check the floors.").strip()
+    for r in regions:
+        if any(b.kind == "panel" for b in r["boxes"]):
+            r["note"] = (r["note"] + " Glass wall: panels were counted from its frame grid, which is an "
+                         "estimate. Check them, or use + and − per floor.").strip()
+            r["floors_check"] = True
     res.floors_check = any(r["floors_check"] for r in sel) or bool(getattr(detect_sam3, "failed_tiles", 0))
     res.note = " ".join(r["note"] for r in sel if r["note"])
     res.floors = price(boxes, 0, base, mult, selected=set(res.selected))
