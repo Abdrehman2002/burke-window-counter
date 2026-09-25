@@ -26,7 +26,7 @@ Intake answers:
 | 1 | jobs-to-be-done | done | CUSTOMER.md | 2026-09-26 |
 | 2 | ux-heuristics | done | DESIGN.md, EXPERIMENTS.md | 2026-09-26 |
 | 3 | design-everyday-things | done | DESIGN.md, EXPERIMENTS.md | 2026-09-26 |
-| 4 | refactoring-ui | pending | DESIGN.md, EXPERIMENTS.md | |
+| 4 | refactoring-ui | done | DESIGN.md, EXPERIMENTS.md | 2026-09-26 |
 | 5 | microinteractions | pending | DESIGN.md, EXPERIMENTS.md | |
 | 6 | made-to-stick | pending | POSITIONING.md, EXPERIMENTS.md | |
 | 7 | influence-psychology | skipped: no in-app upsell, paywall or social-proof surfaces | POSITIONING.md, EXPERIMENTS.md | 2026-09-26 |
@@ -45,6 +45,7 @@ Statuses: pending · in-progress · awaiting-evidence · done · deferred: <reas
 | 2026-09-26 | 1 | Job statement approved as written | Reads without the product; matches Burke's own words |
 | 2026-09-26 | 1 | Worst dimension = **functional accuracy** | Abdur: count accuracy before trust or polish; phases 2-9 aim at correct counts that are visibly correct |
 | 2026-09-26 | 1 | Most likely leak = **Big Hire (the demo)** | If the demo doesn't convince on his building types he never starts; demo-critical flows go first |
+| 2026-09-26 | 4 | Do all of it: hierarchy (total dominates, one primary action, counts over money), snap spacing and type to scales, fix grey contrast; keep palette and fonts, no new colours | Abdur's choice. Score 5/10 → 9/10, proven with grayscale and blur screenshots |
 | 2026-09-26 | 3 | Fix all five severity-3 issues now (near-miss tap + pointer highlight, no silent $0 price, removing a photo removes its side, undo for sample and New quote); severity 1-2 to backlog | Abdur's choice. Rule: guard-rails where the mistake can be made impossible, Undo instead of confirm dialogs. Score 4/10 → 7/10 |
 | 2026-09-26 | 2 | Fix all four severity-3 issues now (framed photo, land on result on phones, undo a recount, 44 px targets); severity 1-2 to backlog | Abdur's choice; the four are the demo-critical ones. Score 6/10 → 8/10 |
 
@@ -52,7 +53,8 @@ Statuses: pending · in-progress · awaiting-evidence · done · deferred: <reas
 - [x] Phase 1: job statement, three dimensions, alternatives (done 2026-09-26)
 - [x] Phase 2: heuristic evaluation; 4 severity-3 fixes shipped and browser-tested (2026-09-26)
 - [x] Phase 3: 5 severity-3 error-proofing fixes shipped and browser-tested (2026-09-26)
-- [ ] Phase 4: refactoring-ui visual hierarchy pass (Claude, next)
+- [x] Phase 4: hierarchy, scales and contrast shipped and verified (2026-09-26)
+- [ ] Phase 5: microinteractions: feedback on edits, the signature moment (Claude, next)
 - [ ] Backlog P3-6..P3-13 guard-rails, stale settings, per-action undo (Claude)
 - [ ] Backlog UX #5 (clickable "things to check") and #6 (floor row highlights its windows) (Claude)
 - [ ] Accuracy work routed to code (from Phase 1 decision): glass-door, balcony and storefront detection as their own types; see AUDIT.md P1 #3 (Claude)

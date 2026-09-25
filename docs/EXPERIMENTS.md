@@ -38,3 +38,5 @@
 | "Settings changed: Count again to apply" (P3-8) | 6/8/8 | backlog |
 | Per-action Undo on merge and Add floor below (P3-9) | 6/8/7 | backlog |
 | Name on the Summary tab with a nudge before print or copy (P3-11) | 6/8/8 | backlog |
+| Total dominates (ink, 64 px); Count secondary once counted; counts emphasised over money (P4-1..4) | 7/8/9 | shipped 2026-09-26 (metric: in the demo recording, Burke reads the total and each floor count without pointing or asking) |
+| Spacing and type on scale; accessible faint grey (P4-5, P4-6) | 4/9/8 | shipped 2026-09-26 (metric: 0 text under 4.5:1 in an automated contrast check) |

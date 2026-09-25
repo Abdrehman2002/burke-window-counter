@@ -10,9 +10,18 @@ Bebas Neue for display (building name, totals, floor headings); Poppins for body
 Tabular numerals on all money and counts.
 
 ## Tokens
-Light: ground `#F8F9FC`, panel `#FFFFFF`, ink `#08142D`, accent `#154BFF`. Dark: ground `#07101F`,
-accent `#3A7BFF`. Warning amber `#A35F00` / `#FFB938`. Floor colours: 8 fixed hues, one per floor.
-(Spacing scale and a full palette audit: Phase 4.)
+- **Spacing scale (Phase 4):** 4 · 8 · 12 · 16 · 24 · 32 · 48 px for every padding, gap and margin.
+  1–3 px hairline offsets on badges are allowed.
+- **Type scale (Phase 4):** 12 · 13 · 15 · 18 · 24 · 36 · 52 · 64 px. Display (Bebas Neue) at 24 and up;
+  Poppins below.
+- **Light palette:** ground `#F8F9FC`, panel `#FFFFFF`, sunk `#F1F4FA`, ink `#08142D`, muted `#5A6480`
+  (5.9:1), **faint `#626D88` (4.7:1; was `#8A93AA` at 2.9:1, failing)**, line `#E2E7F1`, accent `#154BFF`
+  (6.0:1), warn `#A35F00` (5.0:1).
+- **Dark palette:** ground `#07101F`, panel `#0D1A33`, ink `#F3F5FA`, muted `#A4AEC6`, **faint `#7E88A1`
+  (4.9:1)**, accent `#3A7BFF`, warn `#FFB938`.
+- **Colour roles:** ink carries the one number that matters (the quote total); blue is for things you
+  can tap; amber is only "check this"; the 8 floor hues are data, one per floor.
+- **Shadows:** panels `0 1px 2px + 0 8px 24px` (raised); the window menu `0 10px 30px` (floating).
 
 ## Components
 | Component | Decision | Status |
@@ -23,6 +32,10 @@ accent `#3A7BFF`. Warning amber `#A35F00` / `#FFB938`. Floor colours: 8 fixed hu
 | Snapshot / restore | One helper captures photos, quote, name and tab before any reset; Undo restores all of it | shipped 2026-09-26 |
 | Price input | Holds the last valid value; inline error with `aria-invalid` and `role=alert` | shipped 2026-09-26 |
 | Pointer highlight | White outline on the window under the pointer or finger; pointer cursor only over windows | shipped 2026-09-26 |
+| Quote total | Ink, 64 px display: the single "all three levers" element on the screen. Building name drops to 24 px | shipped 2026-09-26 |
+| Count button | Filled only when there is something new to count; outlined once the quote matches the photos | shipped 2026-09-26 |
+| Floor row | Window count 18 px semibold ink (the data being checked); per-floor money 15 px regular muted | shipped 2026-09-26 |
+| Side footer | "Front total · 23 windows  $156" at 18 px, no longer a second display-size total | shipped 2026-09-26 |
 
 ## UX Audit Findings
 Phase 2 (ux-heuristics), 2026-09-26. Heuristic evaluation of the demo flow (add photo → Count → pick
@@ -74,6 +87,24 @@ or error type.
 instead of an "are you sure?" dialog wherever work is thrown away (P3-3, 4, 5, 9).
 **Score after: 7/10.** Recovery and constraints fixed for the severity-3 paths; stale settings (P3-8)
 and the smaller guard-rails remain.
+
+### Phase 4 (refactoring-ui), 2026-09-26
+Grayscale and blur tests on the result and summary screens, a CSS value census, and WCAG contrast.
+**Score before: 5/10** (4 of 8 diagnostic rows failing).
+
+| # | Issue | Heuristic | Severity (0-4) | Fix | Status |
+|---|---|---|---|---|---|
+| P4-1 | Blur test: the building name and the dark Count button outweighed the $156 total, which turns mid-grey in grayscale | Hierarchy (blur / grayscale) | 3 | Total in ink at 64 px; name down to 24 px; blue kept for things you can tap | **fixed** 2026-09-26 |
+| P4-2 | Two primary actions on the result screen: "Count again" stayed filled after a count | One primary per screen | 2 | Outlined once the quote matches the photos; filled again when a photo changes | **fixed** 2026-09-26 |
+| P4-3 | Per-floor window counts (the data being checked) at 14.5 px while the money beside them was bold | Labels vs values | 2 | Counts 18 px semibold ink; money regular muted | **fixed** 2026-09-26 |
+| P4-4 | Two display-size totals (header and side footer) | Hierarchy | 2 | Side footer is a quiet "Front total · N windows" subtotal | **fixed** 2026-09-26 |
+| P4-5 | 17 padding values, 14 gaps, 17 font sizes | Spacing / type scale | 2 | Snapped to 4/8/12/16/24/32/48 and 12/13/15/18/24/36/52/64 (padding 17 → 7 values, fonts 17 → 8) | **fixed** 2026-09-26 |
+| P4-6 | Faint grey `#8A93AA` at 2.9:1 on small text ("Optional", tab amounts, stair labels) | Contrast (WCAG AA 4.5:1) | 3 | `#626D88` (4.7:1) light, `#7E88A1` (4.9:1) dark | **fixed** 2026-09-26 |
+| P4-7 | "counted in 7.0s" in the stats line | Minimalism | 1 | Removed | **fixed** 2026-09-26 |
+| P4-8 | The legend under the photo is three lines of small text | White space | 1 | Shorten in Phase 6 copy pass | backlog (Phase 6) |
+
+**Score after: 9/10.** The blur test now puts the total first, grayscale reads, spacing and type are on
+scale, and contrast passes. Remaining: P4-8.
 
 ## Microinteraction Inventory
 | Interaction | Trigger/Rules/Feedback/Loops | Fix | Status |
