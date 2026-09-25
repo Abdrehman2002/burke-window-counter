@@ -58,6 +58,11 @@
   /* ---------- shell ---------- */
   .shell { max-width: 1440px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px; align-items: start; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+  .foldbar { display: none; width: 100%; border: 0; background: var(--panel); border-radius: 16px; padding: 14px 18px;
+             text-align: left; justify-content: space-between; align-items: center; gap: 10px; min-height: 52px; font-size: 13.5px; }
+  .foldbar b { color: var(--accent); font-weight: 600; white-space: nowrap; }
+  .builder.folded > .sec, .builder.folded > .run { display: none; }
+  .builder.folded .foldbar { display: flex; }
   .builder { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 72px); max-height: calc(100vh - 92px); overflow: auto; display: flex; flex-direction: column; }
   .sec { padding: 18px 18px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 12px; }
   .sec:last-child { border-bottom: 0; }
@@ -207,9 +212,11 @@
   .how b { display: block; color: var(--ink); margin-bottom: 3px; }
 
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  canvas { width: auto; height: auto; max-width: 100%; max-height: 72vh; margin: 0 auto; }
   canvas:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   .codebox { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
   .codebox label { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); }
+  .toastbtn { margin-left: 12px; border: 0; background: none; color: #7FA8FF; font-weight: 600; min-height: 32px; }
   .toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--ground);
            padding: 9px 16px; border-radius: 10px; font-size: 13.5px; z-index: 50; }
 
@@ -224,6 +231,16 @@
     .printsheet .big { font: 28pt/1 var(--display); color: #154BFF; }
   }
 
+  @media (pointer: coarse) {
+    .pickbar .chip, .linkbtn, .mini, .iconbtn, .tab, .bm-count, .toastbtn { min-height: 44px; }
+    .pickbar .chip { padding: 8px 14px; }
+    .mini { display: inline-flex; align-items: center; padding: 0 8px; }
+    .step button { width: 44px; height: 44px; }
+    .bm-floors button { min-width: 44px; height: 44px; }
+    .slot .rm { width: 44px; height: 44px; right: 2px; top: 2px; }
+    .linkbtn { display: inline-flex; align-items: center; }
+    input[type=range] { height: 44px; }
+  }
   @media (max-width: 1100px) {
     .shell { grid-template-columns: 1fr; }
     .builder { position: static; max-height: none; }
@@ -255,7 +272,10 @@
 
 <main class="shell">
   <!-- ================= quote builder ================= -->
-  <aside class="panel builder" aria-label="Quote builder">
+  <aside class="panel builder" id="builder" aria-label="Quote builder">
+    <button class="foldbar" id="unfold" type="button" aria-expanded="false">
+      <span id="foldsum">Photos and prices</span><b>Edit photos &amp; prices</b>
+    </button>
     <section class="sec">
       <div class="sec-h"><h2>Building</h2></div>
       <div>
@@ -354,7 +374,16 @@ const base = () => Math.max(0, parseFloat($("base").value) || 0);
 const mult = () => Math.max(1, parseFloat($("mult").value) || 1);
 const rate = n => base() * Math.pow(mult(), n - 1);
 const colour = n => COLOURS[(n - 1) % COLOURS.length];
-function toast(t) { const el = $("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
+// A short message at the bottom; with an action it stays longer and carries one button (e.g. Undo).
+function toast(t, action) {
+  const el = $("toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t);
+  if (action) {
+    const b = document.createElement("button"); b.type = "button"; b.className = "toastbtn"; b.textContent = action.label;
+    b.addEventListener("click", () => { el.hidden = true; action.fn(); });
+    el.appendChild(b);
+  }
+  toast.t = setTimeout(() => el.hidden = true, action ? 9000 : 2200);
+}
 
 /* ================= builder ================= */
 const CAMERA = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
@@ -420,7 +449,10 @@ function refreshRun() {
   const n = Object.keys(S.photos).length;
   $("photoCount").textContent = `${n} of 4 sides`;
   $("go").disabled = n === 0 || !!S.running;
-  if (!S.running) setMsg(n ? `${n} side${n > 1 ? "s" : ""} ready. Takes about 10 seconds.` : "Add a photo of at least one side.");
+  $("go").textContent = S.quote && !S.quote.example ? "Count again" : "Count windows and price it";
+  if (!S.running) setMsg(!n ? "Add a photo of at least one side."
+    : S.quote && !S.quote.example && quoteEdited() ? "Counting again replaces your fixes (you can undo)."
+    : `${n} side${n > 1 ? "s" : ""} ready. Takes about 10 seconds.`);
 }
 
 function renderStairs() {
@@ -446,6 +478,7 @@ $("codebox").addEventListener("submit", e => {
 async function run() {
   const sides = SIDES.filter(s => S.photos[s]);
   if (!sides.length) return;
+  const prev = S.quote && !S.quote.example && quoteEdited() ? S.quote : null;  // your fixes, kept for Undo
   S.running = Object.fromEntries(sides.map(s => [s, "wait"]));
   refreshRun(); setMsg("Counting windows…"); renderWork();
   const t0 = performance.now();
@@ -476,7 +509,10 @@ async function run() {
   if (needCode) { renderWork(); askForCode(); return; }
   if (failed.length) setMsg(`Couldn't count ${failed.join(", ")}: ${S.lastErr || "try again"}.`, true);
   else setMsg(`Done in ${S.quote.seconds.toFixed(1)}s. Check the flagged floors, then send.`);
+  S.builderOpen = false;
   renderWork();
+  if (prev && S.quote !== prev) toast("Counted again. Your earlier fixes were replaced.", { label: "Undo", fn: () => { S.quote = prev; S.tab = Object.keys(prev.sides)[0]; renderWork(); toast("Earlier quote restored"); } });
+  if (narrow() && !failed.length) $("work").scrollIntoView({ behavior: "smooth", block: "start" });  // land on the result
 }
 
 // Windows cut off by the photo's edge, or on a wall other than the one this photo quotes, start out
@@ -547,11 +583,44 @@ function isLevel(bs) {
 }
 
 // Bands first, then every box on top, so no floor's band can paint over another floor's boxes.
+// The part of the photo to show, in photo coordinates: the chosen buildings plus a margin, so their windows
+// are big enough to check. The whole photo when they already fill most of it, or when the viewer asks.
+function viewOf(q) {
+  const r = q.res, full = { x: 0, y: 0, w: r.width, h: r.height, zoomed: false };
+  if (q.full || !q.sel) return full;
+  const pts = [];
+  pickable(q).filter(R => q.sel.has(R.id)).forEach(R => R.polygon.forEach(p => pts.push(p)));
+  r.boxes.forEach((b, i) => { if (inSel(q, i)) pts.push([b.x0, b.y0], [b.x1, b.y1]); });
+  if (!pts.length) return full;
+  let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0]));
+  let y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
+  const m = 0.06 * Math.max(x1 - x0, y1 - y0);
+  x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(r.width, x1 + m); y1 = Math.min(r.height, y1 + m);
+  if ((x1 - x0) * (y1 - y0) > 0.6 * r.width * r.height) return full;  // already fills the photo
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, zoomed: true };
+}
+// Screen point on the photo -> photo coordinates, through the current framing
+function toPhoto(side, clientX, clientY) {
+  const q = S.quote.sides[side], v = q.view || viewOf(q), rect = $("cv").getBoundingClientRect();
+  return [v.x + (clientX - rect.left) / rect.width * v.w, v.y + (clientY - rect.top) / rect.height * v.h];
+}
+function toScreen(side, x, y) {
+  const q = S.quote.sides[side], v = q.view || viewOf(q), rect = $("cv").getBoundingClientRect();
+  return [rect.left + (x - v.x) / v.w * rect.width, rect.top + (y - v.y) / v.h * rect.height];
+}
+
 function draw(canvas, side) {
   const q = S.quote.sides[side], r = q.res, img = q.img;
-  canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-  const g = canvas.getContext("2d"), W = canvas.width, k = W / r.width;
-  const lw = Math.max(2, W / 450), fs = Math.round(Math.max(15, W / 58));
+  const k = img.naturalWidth / r.width;            // photo coordinates -> image pixels
+  const v = q.view = viewOf(q);
+  const vx = v.x * k, vy = v.y * k, vw = v.w * k, vh = v.h * k;
+  const CW = Math.round(Math.min(2000, Math.max(1200, vw)));  // draw a framed view at high resolution
+  const Z = CW / vw;
+  canvas.width = CW; canvas.height = Math.round(vh * Z);
+  const g = canvas.getContext("2d");
+  g.setTransform(Z, 0, 0, Z, -vx * Z, -vy * Z);    // everything below stays in image pixels
+  const W = vx + vw, L0 = vx;                        // visible right and left edges
+  const lw = Math.max(2, CW / 450) / Z, fs = Math.round(Math.max(15, CW / 58)) / Z;
   g.drawImage(img, 0, 0);
   // Buildings / walls: the ones not being quoted are dimmed, the chosen ones outlined, all numbered.
   const regs = pickable(q);
@@ -598,10 +667,10 @@ function draw(canvas, side) {
   for (const L of layers) {
     const level = isLevel(L.bs), lead = L.bs.reduce((a, b) => b.x0 < a.x0 ? b : a);
     const label = ` Floor ${L.fl.floor} · ${L.fl.windows} `, tw = g.measureText(label).width;
-    let lx = level ? 0 : Math.max(0, lead.x0 * k - 4), ty = level ? Math.min(...L.bs.map(b => b.y0)) * k : lead.y0 * k - fs - 14;
-    lx = Math.min(lx, W - tw - 12); ty = Math.max(0, ty);
-    g.fillStyle = L.col; g.fillRect(lx, ty, tw + 10, fs + 12);
-    g.fillStyle = "#fff"; g.fillText(label, lx + 5, ty + 6);
+    let lx = level ? L0 : Math.max(L0, lead.x0 * k - 4), ty = level ? Math.min(...L.bs.map(b => b.y0)) * k : lead.y0 * k - fs - 14 / Z;
+    lx = Math.min(lx, W - tw - 12 / Z); ty = Math.max(vy, ty);
+    g.fillStyle = L.col; g.fillRect(lx, ty, tw + 10 / Z, fs + 12 / Z);
+    g.fillStyle = "#fff"; g.fillText(label, lx + 5 / Z, ty + 6 / Z);
   }
   if (q.kb != null && inSel(q, q.kb)) {  // keyboard focus ring
     const b = r.boxes[q.kb];
@@ -609,16 +678,16 @@ function draw(canvas, side) {
     g.lineWidth = lw * 1.5; g.strokeStyle = "#08142D"; g.strokeRect(b.x0 * k - lw * 2, b.y0 * k - lw * 2, (b.x1 - b.x0) * k + lw * 4, (b.y1 - b.y0) * k + lw * 4);
   }
   if (regs.length >= 2) {  // number badges last, so nothing covers them
-    const bf = Math.round(fs * 1.25);
+    const bf = fs * 1.25;
     g.font = `700 ${bf}px Poppins, "Segoe UI", sans-serif`;
     for (const R of regs) {
       const on = q.sel && q.sel.has(R.id);
       const xs = R.polygon.map(p => p[0]), ys = R.polygon.map(p => p[1]);
-      const cx = (Math.min(...xs) + Math.max(...xs)) / 2 * k, ty = Math.max(4, Math.min(...ys) * k + 6);
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2 * k, ty = Math.max(vy + 4 / Z, Math.min(...ys) * k + 6 / Z);
       const label = ` ${on ? "✓ " : ""}${R.id} · ${R.windows} windows `, tw = g.measureText(label).width;
-      const bx = Math.min(Math.max(4, cx - tw / 2), W - tw - 14);
-      g.fillStyle = on ? "#154BFF" : "rgba(8,20,45,.85)"; g.fillRect(bx, ty, tw + 10, bf + 14);
-      g.fillStyle = "#fff"; g.fillText(label, bx + 5, ty + 7);
+      const bx = Math.min(Math.max(L0 + 4 / Z, cx - tw / 2), W - tw - 14 / Z);
+      g.fillStyle = on ? "#154BFF" : "rgba(8,20,45,.85)"; g.fillRect(bx, ty, tw + 10 / Z, bf + 14 / Z);
+      g.fillStyle = "#fff"; g.fillText(label, bx + 5 / Z, ty + 7 / Z);
     }
   }
 }
@@ -627,8 +696,8 @@ function draw(canvas, side) {
 // Smallest box under the pointer wins. Not on a counted window: toggles the building under the pointer.
 function onCanvasClick(e, side) {
   if (S.skipClick) { S.skipClick = false; return; }  // the click that ends a drag is not a tap
-  const cv = e.currentTarget, rect = cv.getBoundingClientRect(), q = S.quote.sides[side], r = q.res;
-  const x = (e.clientX - rect.left) / rect.width * r.width, y = (e.clientY - rect.top) / rect.height * r.height;
+  const q = S.quote.sides[side], r = q.res;
+  const [x, y] = toPhoto(side, e.clientX, e.clientY);
   let best = -1, area = Infinity;
   r.boxes.forEach((b, i) => {
     if (!inSel(q, i)) return;
@@ -696,8 +765,8 @@ function onCanvasKey(e, side) {
     $("sr").textContent = `Window ${order.indexOf(q.kb) + 1} of ${order.length}, floor ${q.fl[q.kb]}, ${q.removed.has(q.kb) ? "not counted" : "counted"}. Enter to change it.`;
   } else if ((e.key === "Enter" || e.key === " ") && q.kb != null && at >= 0) {
     e.preventDefault();
-    const b = r.boxes[q.kb], cv = $("cv").getBoundingClientRect();
-    openBoxMenu(side, q.kb, cv.left + (b.x0 + b.x1) / 2 / r.width * cv.width, cv.top + (b.y0 + b.y1) / 2 / r.height * cv.height);
+    const b = r.boxes[q.kb], [sx, sy] = toScreen(side, (b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
+    openBoxMenu(side, q.kb, sx, sy);
   }
 }
 // Close the window menu. With refocus, keyboard focus returns to the photo (after any re-render).
@@ -738,10 +807,12 @@ function startDrawArea(side) {
   const up = async e => {
     if (!start) return;
     S.skipClick = true;
-    const [x, y] = pos(e), r = cv.getBoundingClientRect(), sx = q.res.width / r.width, sy = q.res.height / r.height;
-    const area = [Math.min(x, start[0]) * sx, Math.min(y, start[1]) * sy, Math.max(x, start[0]) * sx, Math.max(y, start[1]) * sy];
+    const [x, y] = pos(e), r = cv.getBoundingClientRect();
+    const [ax, ay] = toPhoto(side, r.left + Math.min(x, start[0]), r.top + Math.min(y, start[1]));
+    const [bx, by] = toPhoto(side, r.left + Math.max(x, start[0]), r.top + Math.max(y, start[1]));
+    const area = [ax, ay, bx, by];
     cleanup();
-    if (area[2] - area[0] < 20 || area[3] - area[1] < 20) { toast("That area was too small. Try again."); return; }
+    if (area[2] - area[0] < 15 || area[3] - area[1] < 15) { toast("That area was too small. Try again."); return; }
     hint.textContent = "Counting that area…"; wrap.appendChild(hint);
     try {
       const c = document.createElement("canvas"); c.width = q.img.naturalWidth; c.height = q.img.naturalHeight;
@@ -787,7 +858,25 @@ function renderWork() {
   }
 }
 
+const narrow = () => matchMedia("(max-width: 1100px)").matches;
+// On a phone, once a real quote exists the setup folds into one bar so the result sits near the top.
+function syncFold() {
+  const fold = narrow() && S.quote && !S.quote.example && !S.running && !S.builderOpen;
+  $("builder").classList.toggle("folded", !!fold);
+  $("unfold").setAttribute("aria-expanded", String(!fold));
+  if (fold) {
+    const n = Object.keys(S.photos).length;
+    $("foldsum").textContent = `${n} photo${n === 1 ? "" : "s"} · ${money(base())} first floor, ×${mult()} per floor`;
+  }
+}
+$("unfold").addEventListener("click", () => { S.builderOpen = true; syncFold(); $("bname").focus(); });
+
 function renderWorkInner(w) {
+  syncFold();
+  // After the viewer fixes something, warn before a recount would replace it (the recount can be undone)
+  if (!S.running && S.quote && !S.quote.example && quoteEdited()) {
+    $("go").textContent = "Count again"; setMsg("Counting again replaces your fixes (you can undo).");
+  }
   if (S.running) {
     w.innerHTML = `<div class="panel progress">
       <h2 style="margin:0;font:28px/1 var(--display);letter-spacing:.4px">Counting windows</h2>
@@ -884,6 +973,7 @@ function renderSide(side) {
   cv.addEventListener("keydown", e => { if (!S.drawing) onCanvasKey(e, side); });
   $("tabbody").querySelectorAll("[data-region]").forEach(b => b.addEventListener("click", () => toggleRegion(side, +b.dataset.region)));
   $("drawarea")?.addEventListener("click", () => { if (S.drawing) { S.drawing(); return; } startDrawArea(side); });
+  $("zoomtoggle")?.addEventListener("click", () => { q.full = !q.full; renderWork(); });
   $("backregions")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.orig, q.img); renderWork(); toast("Back to the buildings found in the photo"); });
   $("tabbody").querySelectorAll(".step button").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.f, d = +b.dataset.d, line = floorsOf(side).find(l => l.floor === f);
@@ -905,18 +995,25 @@ function renderSide(side) {
   $("undo")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.res, q.img, q.orig); renderWork(); toast("Back to the detected counts"); });
 }
 
+// Zoomed in on the chosen buildings? Offer the whole photo, and back.
+function zoomChip(q) {
+  const zoomed = viewOf(Object.assign({}, q, { full: false })).zoomed;
+  if (!zoomed) return "";
+  return `<button class="chip" id="zoomtoggle" data-fk="zoomtoggle" type="button">${q.full ? "Zoom to the building" : "Show whole photo"}</button>`;
+}
+
 // Above the photo: which buildings / walls this side's quote covers, and the draw-your-own-area tool.
 function pickBar(side) {
   const q = S.quote.sides[side], regs = pickable(q);
   if (q.orig) return `<div class="pickbar on"><span><b>Counting the area you drew.</b></span>
-      <span class="pickacts"><button class="chip" id="drawarea" type="button">Draw again</button>
+      <span class="pickacts">${zoomChip(q)}<button class="chip" id="drawarea" type="button">Draw again</button>
       <button class="chip" id="backregions" type="button">Back to buildings</button></span></div>`;
   const chips = regs.length >= 2 ? regs.map(R => `<button class="chip ${q.sel.has(R.id) ? "on" : ""}" type="button" data-region="${R.id}"
       aria-pressed="${q.sel.has(R.id)}" data-fk="reg-${R.id}">${q.sel.has(R.id) ? "✓ " : ""}${R.id} · ${esc(R.label)} · ${R.windows}</button>`).join("") : "";
   const ask = regs.length >= 2 ? (q.touched ? "<b>Counting:</b>" : `<b>This photo shows ${regs.length} buildings or walls.</b> Tap the ones you're quoting, on the photo or here:`) : "";
   return `<div class="pickbar ${needsPick(q) ? "ask" : ""}">
       ${ask ? `<span>${ask}</span><span class="chips">${chips}</span>` : `<span class="muted">Counting the whole building.</span>`}
-      <span class="pickacts"><button class="chip ghost" id="drawarea" type="button" title="Drag a box over exactly the wall to count">Draw the area to count</button></span></div>`;
+      <span class="pickacts">${zoomChip(q)}<button class="chip ghost" id="drawarea" data-fk="drawarea" type="button" title="Drag a box over exactly the wall to count">Draw the area to count</button></span></div>`;
 }
 
 function summaryRows() {

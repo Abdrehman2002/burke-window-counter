@@ -24,7 +24,7 @@ Intake answers:
 | Phase | Skill | Status | Artifact | Date |
 |---|---|---|---|---|
 | 1 | jobs-to-be-done | done | CUSTOMER.md | 2026-09-26 |
-| 2 | ux-heuristics | pending | DESIGN.md, EXPERIMENTS.md | |
+| 2 | ux-heuristics | done | DESIGN.md, EXPERIMENTS.md | 2026-09-26 |
 | 3 | design-everyday-things | pending | DESIGN.md, EXPERIMENTS.md | |
 | 4 | refactoring-ui | pending | DESIGN.md, EXPERIMENTS.md | |
 | 5 | microinteractions | pending | DESIGN.md, EXPERIMENTS.md | |
@@ -45,10 +45,13 @@ Statuses: pending · in-progress · awaiting-evidence · done · deferred: <reas
 | 2026-09-26 | 1 | Job statement approved as written | Reads without the product; matches Burke's own words |
 | 2026-09-26 | 1 | Worst dimension = **functional accuracy** | Abdur: count accuracy before trust or polish; phases 2-9 aim at correct counts that are visibly correct |
 | 2026-09-26 | 1 | Most likely leak = **Big Hire (the demo)** | If the demo doesn't convince on his building types he never starts; demo-critical flows go first |
+| 2026-09-26 | 2 | Fix all four severity-3 issues now (framed photo, land on result on phones, undo a recount, 44 px targets); severity 1-2 to backlog | Abdur's choice; the four are the demo-critical ones. Score 6/10 → 8/10 |
 
 ## Next Actions
 - [x] Phase 1: job statement, three dimensions, alternatives (done 2026-09-26)
-- [ ] Phase 2: UX heuristics on the demo-critical flow (upload, count, building pick, check, fix) (Claude, next)
+- [x] Phase 2: heuristic evaluation; 4 severity-3 fixes shipped and browser-tested (2026-09-26)
+- [ ] Phase 3: design-everyday-things on the core flows: count, pick, check, fix, destructive actions (Claude, next)
+- [ ] Backlog UX #5 (clickable "things to check") and #6 (floor row highlights its windows) (Claude)
 - [ ] Accuracy work routed to code (from Phase 1 decision): glass-door, balcony and storefront detection as their own types; see AUDIT.md P1 #3 (Claude)
 - [ ] Interview Burke on his timeline (first quote, what he tried, what scared him) to evidence the emotional and social dimensions (Abdur, on the first call)
 - [ ] Set `ACCESS_CODE` in Vercel before the link goes to Burke (Abdur)
