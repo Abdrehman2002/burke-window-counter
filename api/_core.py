@@ -72,6 +72,7 @@ class Box:
     other_side: bool = False  # not on the one wall this photo is quoting (a second side, or next door)
     weak: bool = False  # the detector was under WEAK_BELOW sure: shown as a suggestion, not counted
     region: int = 0  # which building / wall of the photo this window belongs to (see Region)
+    kind: str = "window"  # which prompt found it: "window", a glass-door prompt, or "door" (solid door, not counted)
 
     @property
     def counted(self): return not (self.edge or self.other_side or self.weak)
@@ -97,14 +98,21 @@ def _jpeg_b64(img: Image.Image) -> str:
 # Things whose "windows" are not building windows. Asked for in the same SAM 3 call; any window
 # whose centre sits on one of these is dropped.
 EXCLUDE_PROMPTS = ["car", "vehicle"]
+# Glass to count. Extra prompts ride in the same request, so they cost nothing more.
+GLASS_PROMPTS = [p.strip() for p in os.environ.get("GLASS_PROMPTS", "window").split(",") if p.strip()]
+# Doors are found only to drop a small window that sits inside a solid door (a door light is not a window).
+# Tested 2026-09-26: adding "door" to the same SAM 3 request changes what it returns for "window" (fake
+# floors on Karlsruhe and the rowhouses): 85% -> 70%. Off by default. Extra glass prompts ("glass door",
+# "french door") scored 82% vs 85% for "window" alone, so GLASS_PROMPTS stays "window".
+DOOR_RULE = os.environ.get("DOOR_RULE", "0") == "1"
 
 
-def _sam3_boxes(pred_list) -> list[Box]:
+def _sam3_boxes(pred_list, kind="window") -> list[Box]:
     boxes = []
     for p in pred_list:
         pts = np.array([pt for poly in p["masks"] for pt in poly], dtype=float)
         if len(pts):
-            boxes.append(Box(pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max(), p["confidence"]))
+            boxes.append(Box(pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max(), p["confidence"], kind=kind))
     return boxes
 
 
@@ -131,17 +139,26 @@ def _roboflow_post(payload: dict, tries=2) -> dict:
 
 
 def _sam3_call(img: Image.Image, thresh=0.4, prompt="window") -> list[Box]:
-    """One SAM 3 request: windows, minus any whose centre sits on a car or vehicle."""
-    prompts = [{"type": "text", "text": prompt}] + [{"type": "text", "text": t} for t in EXCLUDE_PROMPTS]
+    """One SAM 3 request for every kind at once: the glass prompts (counted), cars and vehicles (anything on
+    them is dropped) and, with DOOR_RULE, doors (returned as kind "door", never counted)."""
+    glass = GLASS_PROMPTS if prompt == "window" else [prompt]
+    names = glass + EXCLUDE_PROMPTS + (["door"] if DOOR_RULE else [])
     data = _roboflow_post({"image": {"type": "base64", "value": _jpeg_b64(img)},
-                           "prompts": prompts, "output_prob_thresh": thresh, "format": "polygon"})
+                           "prompts": [{"type": "text", "text": t} for t in names],
+                           "output_prob_thresh": thresh, "format": "polygon"})
     results = sorted(data["prompt_results"], key=lambda x: x["prompt_index"])
-    windows = _sam3_boxes(results[0]["predictions"])
-    blockers = [b for res in results[1:] for b in _sam3_boxes(res["predictions"])]
+    windows, blockers, doors = [], [], []
+    for name, res in zip(names, results):
+        if name in glass:
+            windows += _sam3_boxes(res["predictions"], "window" if name == "window" else name)
+        elif name == "door":
+            doors += _sam3_boxes(res["predictions"], "door")
+        else:
+            blockers += _sam3_boxes(res["predictions"])
     def on_blocker(w: Box) -> bool:
         cx = (w.x0 + w.x1) / 2
         return any(k.x0 <= cx <= k.x1 and k.y0 <= w.cy <= k.y1 for k in blockers)
-    return [w for w in windows if not on_blocker(w)]
+    return [w for w in windows if not on_blocker(w)] + doors
 
 
 TILE_GRID = int(os.environ.get("TILE_GRID", "2"))
@@ -268,7 +285,9 @@ def clean(boxes: list[Box]) -> list[Box]:
     boxes = [b for b in boxes if b.area > 0]
     if not boxes:
         return []
-    typical = float(np.median([b.area for b in boxes]))
+    # "A normal window's size" comes from confident boxes only; low-confidence specks would shrink it.
+    sure = [b.area for b in boxes if b.conf >= 0.5] or [b.area for b in boxes]
+    typical = float(np.median(sure))
     groups = set()
     for i, big in enumerate(boxes):
         inside = [s for j, s in enumerate(boxes) if j != i and s.area < big.area and _inter(s, big) / s.area > 0.4]
@@ -297,6 +316,87 @@ def clean(boxes: list[Box]) -> list[Box]:
         med = np.median([k.area for k in kept])
         kept = [k for k in kept if k.area < med * 8]
     return kept
+
+
+# Tested 2026-09-26 on the 10-building benchmark: close-up verification of low-confidence candidates found
+# a missed floor (Wien) but let in more false windows (panes, porch lattice) than it recovered: 83% -> 69-73%.
+# Off by default; kept as a switch for a better verifier.
+VERIFY = os.environ.get("VERIFY", "0") == "1"
+CAND_THRESH = float(os.environ.get("CAND_THRESH", "0.2"))  # SAM 3 candidates this sure or more get a look
+VERIFY_MAX = 48
+
+VERIFY_PROMPT = (
+    "Each numbered tile is a close-up from a photo of a building, with a RED box drawn on it. For each "
+    "number, answer true if the red box is ONE window or ONE glass door that a window cleaner would clean "
+    "(including French doors and windows behind railings or bars), and false if it is anything else: wall, "
+    "roof, trim, a vent, a solid door, a door's small window, a sign, a light, a tree or leaves, a vehicle, "
+    "a reflection, a boarded-up opening with no glass, or a box around several windows at once. "
+    "Tiles: {nums}. Return JSON only: {{\"windows\": {{\"1\": true, \"2\": false}}}}")
+
+
+def _candidate_sheet(img: Image.Image, cands: list[Box], tile=192, cols=8) -> Image.Image:
+    """A contact sheet: each candidate as a close-up with its box in red and a number, so the model judges
+    one small, clear question per tile instead of searching the whole photo."""
+    rows = (len(cands) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * tile, rows * tile), (255, 255, 255))
+    d = ImageDraw.Draw(sheet)
+    f = _font(22)
+    for i, b in enumerate(cands):
+        m = 0.6 * max(b.w, b.h) + 8
+        x0, y0 = max(0, b.x0 - m), max(0, b.y0 - m)
+        x1, y1 = min(img.width, b.x1 + m), min(img.height, b.y1 + m)
+        crop = img.crop((int(x0), int(y0), int(x1), int(y1)))
+        k = (tile - 8) / max(crop.width, crop.height)
+        crop = crop.resize((max(1, int(crop.width * k)), max(1, int(crop.height * k))))
+        cd = ImageDraw.Draw(crop)
+        cd.rectangle([(b.x0 - x0) * k, (b.y0 - y0) * k, (b.x1 - x0) * k, (b.y1 - y0) * k], outline=(255, 0, 0), width=3)
+        ox, oy = (i % cols) * tile + 4, (i // cols) * tile + 4
+        sheet.paste(crop, (ox, oy))
+        d.rectangle([ox, oy, ox + 34, oy + 28], fill=(0, 0, 0))
+        d.text((ox + 4, oy + 2), str(i + 1), font=f, fill=(255, 255, 0))
+    return sheet
+
+
+def verify_candidates(img: Image.Image, cands: list[Box], provider="openai"):
+    """Ask the model, 3 votes, whether each doubtful candidate is a window or glass door. A unanimous yes
+    counts it; a split yes counts it but leaves it amber for the viewer; a no leaves it uncounted."""
+    if not cands:
+        return
+    cands = sorted(cands, key=lambda b: -b.conf)[:VERIFY_MAX]
+    picture = _candidate_sheet(img, cands)
+    prompt = VERIFY_PROMPT.format(nums=", ".join(str(i + 1) for i in range(len(cands))))
+    from concurrent.futures import ThreadPoolExecutor
+    ask = (lambda: _openai_json(picture, prompt)) if provider == "openai" else (lambda: _gemini_json(GEMINI_MODEL, picture, prompt))
+    with ThreadPoolExecutor(VOTES) as ex:
+        futs = [ex.submit(ask) for _ in range(VOTES)]
+    votes = []
+    for f in futs:
+        try:
+            a = json.loads(f.result())
+            if isinstance(a, dict) and isinstance(a.get("windows"), dict):
+                votes.append(a["windows"])
+        except Exception:
+            pass
+    if not votes:
+        return
+    for i, b in enumerate(cands):
+        yes = sum(1 for v in votes if v.get(str(i + 1)) is True)
+        if yes * 2 > len(votes):
+            b.weak = False
+            b.conf = max(b.conf, CHECK_BELOW if yes == len(votes) else min(b.conf, CHECK_BELOW - 0.01))
+
+
+def _drop_door_lights(windows: list[Box], doors: list[Box]) -> list[Box]:
+    """A small window inside a solid door (a door light or a grille) is not a window to clean. A box that
+    fills most of a door is the door itself seen as glass (a French or glass door) and is kept."""
+    out = []
+    for w in windows:
+        cx = (w.x0 + w.x1) / 2
+        inside = [d for d in doors if d.x0 <= cx <= d.x1 and d.y0 <= w.cy <= d.y1 and d.area > 0]
+        if inside and all(w.area < 0.45 * d.area for d in inside) and w.kind == "window":
+            continue
+        out.append(w)
+    return out
 
 
 def _merge_stacked(boxes: list[Box]) -> list[Box]:
@@ -1043,13 +1143,17 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     start_budget()
     detect_sam3.failed_tiles = 0
     with ThreadPoolExecutor(2) as ex:
-        f_win = ex.submit(lambda: detect_sam3(img, thresh) if detector == "sam3" else detect_gemini(img))
+        f_win = ex.submit(lambda: detect_sam3(img, min(thresh, CAND_THRESH) if VERIFY else thresh) if detector == "sam3" else detect_gemini(img))
         f_bld = ex.submit(lambda: segment_buildings(img))
         raw = f_win.result()
         try:
             polys = f_bld.result()
         except Exception:
             polys = []  # no building outlines: the whole photo is one region
+    doors = [b for b in raw if b.kind == "door"]
+    raw = [b for b in raw if b.kind != "door"]
+    if doors:
+        raw = _drop_door_lights(raw, doors)
     boxes = clean(raw)
     if len(boxes) > MAX_BOXES:  # more than any real facade: keep the most confident
         boxes = sorted(boxes, key=lambda b: b.conf, reverse=True)[:MAX_BOXES]
@@ -1059,6 +1163,17 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     for b in boxes:
         b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
         b.weak = bool(b.conf < WEAK_BELOW)
+    if VERIFY and floors == "ai" and os.environ.get("OPENAI_API_KEY"):
+        # Doubtful detections (between the candidate threshold and WEAK_BELOW) get a close-up check.
+        strong = [b for b in boxes if not b.weak]
+        # Only genuinely new candidates: anything overlapping a confident window is a pane, a duplicate
+        # or a frame of it, and a close-up of a pane looks like a window, so those are never asked about.
+        doubtful = [b for b in boxes if b.weak and not b.edge and b.conf >= CAND_THRESH
+                    and all(_inter(b, t) < 0.1 * min(b.area, t.area) for t in strong)]
+        try:
+            verify_candidates(img, doubtful)
+        except Exception:
+            pass  # unverified doubtful boxes just stay uncounted, as before
     regions = find_regions(img, boxes, polys) if boxes else []
     res = SideResult(name, boxes)
     res.regions = regions

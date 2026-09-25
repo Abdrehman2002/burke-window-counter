@@ -22,6 +22,9 @@ TRUTH = {
     "10_irregular_knox": [2, 7, 8, 8],
     "11_irregular_wien": [3, 4, 3, 3],
     "01_1storey_maracaibo": [2],
+    "02a_colonial": [8, 6],
+    "03a_rowhouses_fulton": ([4, 4, 11, 11], "all"),
+    "07b_church_mtgregory": [4],
 }
 
 CACHE = os.path.join(HERE, "test-photos", ".cache")
@@ -30,12 +33,13 @@ _real_detect = c.detect_sam3
 
 
 def cached_detect(img, thresh=0.4, prompt="window"):
-    key = f"{cached_detect.name}_g{c.TILE_GRID}_t{thresh}.json"
+    tag = "-".join(p.replace(" ", "") for p in c.GLASS_PROMPTS) + ("_door" if c.DOOR_RULE else "")
+    key = f"{cached_detect.name}_g{c.TILE_GRID}_t{thresh}_{tag}.json"
     path = os.path.join(CACHE, key)
     if os.path.exists(path):
-        return [c.Box(*b) for b in json.load(open(path))]
+        return [c.Box(*b[:5], kind=b[5] if len(b) > 5 else "window") for b in json.load(open(path))]
     boxes = _real_detect(img, thresh, prompt)
-    json.dump([[b.x0, b.y0, b.x1, b.y1, b.conf] for b in boxes], open(path, "w"))
+    json.dump([[b.x0, b.y0, b.x1, b.y1, b.conf, b.kind] for b in boxes], open(path, "w"))
     return boxes
 
 
@@ -47,10 +51,16 @@ def main():
     c.detect_sam3 = cached_detect
     tot_floor_ok = tot_abs = tot_true = n = 0
     for name, truth in TRUTH.items():
+        select = None
+        if isinstance(truth, tuple):
+            truth, select = truth
         img = Image.open(os.path.join(HERE, "test-photos", name + ".jpg")).convert("RGB")
         for r in range(a.runs):
             cached_detect.name = name
             res = c.run_side(img, name)
+            if select == "all":  # the viewer taps every building that has windows
+                res.selected = [r["id"] for r in res.regions if r["windows"] > 0]
+                res.floors = c.price(res.boxes, 0, selected=set(res.selected))
             got = [f.windows for f in res.floors]
             k = max(len(got), len(truth))
             g = got + [0] * (k - len(got))

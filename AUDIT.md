@@ -54,6 +54,28 @@ independent read of the code.
 5. ✅ **Done today:** the local dev server was serving `.env` (your API keys) to your whole network.
    It now binds to localhost and serves only the page and photos. `.env` is excluded from Vercel uploads.
 
+## Accuracy experiments (2026-09-26)
+
+The benchmark grew from 7 to 10 hand-counted buildings (colonial with French doors, Baltimore rowhouses,
+country church). Counting rule: every window or glass door you'd clean counts; a solid door with a small
+window doesn't. Baseline on the harder set: **83% of windows on the right floor, floor count right 8/10,
+identical across runs.**
+
+| Change tried | Result | Kept? |
+|---|---|---|
+| Add "door" to the SAM 3 request to drop door lights | 70%. The extra prompt changes what SAM 3 returns for "window" and created fake floors | No (off by default) |
+| Add "glass door" / "french door" prompts | 82% | No |
+| Add "glass" prompt | 59% | No |
+| Low threshold (0.2) + GPT close-up verification of doubtful candidates | 73%. Found Wien's missing balcony floor but let in panes and porch lattice | No (off by default, kept as a switch) |
+| Same, only for candidates not overlapping a confident window (0.2 / 0.3) | 69% / 69% | No |
+| "Normal window size" measured from confident boxes only | Stabilises clean-up; baseline unchanged at 83% | Yes |
+
+**Conclusion:** zero-shot SAM 3 plus prompt and threshold tuning has reached its ceiling here, about
+83–89% depending on the buildings. The misses left (French and glass doors, glass behind balconies,
+boarded openings, side walls) are "what counts as a window" judgments. A general detector can't learn
+those from prompts. **A step change needs a detector trained on labelled facades under Burke's own
+counting rules** (see #4 below).
+
 ## P1: accuracy (the product is only as good as this)
 
 Ranked by how much they move the count per hour of work:
