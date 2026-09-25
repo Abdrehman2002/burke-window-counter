@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+output/
+_debug.jpg
+.streamlit/secrets.toml
+photos/rejected/
