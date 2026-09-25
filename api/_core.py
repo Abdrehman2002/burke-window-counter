@@ -169,9 +169,9 @@ def clean(boxes: list[Box]) -> list[Box]:
     typical = float(np.median([b.area for b in boxes]))
     groups = set()
     for i, big in enumerate(boxes):
-        inside = [s for j, s in enumerate(boxes) if j != i and s.area < big.area and _inter(s, big) / s.area > 0.6]
+        inside = [s for j, s in enumerate(boxes) if j != i and s.area < big.area and _inter(s, big) / s.area > 0.4]
         window_sized = [s for s in inside if s.area > 0.45 * typical]
-        if len(window_sized) >= 2 and big.area > 1.6 * typical:
+        if len(window_sized) >= 2 and big.area > 1.3 * typical:
             groups.add(i)
     boxes = [b for i, b in enumerate(boxes) if i not in groups]
     # same window detected twice, partly offset
@@ -292,6 +292,117 @@ def build_rows(boxes: list[Box], min_overlap=0.5) -> list[list[Box]]:
     return sorted(groups.values(), key=lambda row: np.median([b.cy for b in row]), reverse=True)
 
 
+def lattice_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
+    """Floors the way a person counts them: go up a column of windows.
+
+    Two local rules, each only between neighbouring windows:
+      - the most level window beside you is on the SAME floor;
+      - the nearest window directly above you is ONE floor up (if the gap is a normal floor's height).
+    Following those links across the wall gives every window a floor. Because each rule only compares
+    neighbours, sloping rows in a photo taken looking up (perspective) don't break it.
+    Returns (rows bottom-first, is_grid). is_grid is True when most windows have a window above or below,
+    i.e. a regular facade where this geometry can be trusted on its own."""
+    n = len(boxes)
+    if n == 0:
+        return [], False
+    cx = [(b.x0 + b.x1) / 2 for b in boxes]
+    edges: list[tuple[int, int, int]] = []  # (i, j, level_j - level_i)
+
+    # same floor: best neighbour on each side
+    for i, a in enumerate(boxes):
+        for side in (-1, 1):
+            best, best_score = -1, 0.5
+            for j, c in enumerate(boxes):
+                if j == i or side * (cx[j] - cx[i]) <= 0:
+                    continue
+                ov = (min(a.y1, c.y1) - max(a.y0, c.y0)) / min(a.h, c.h)
+                if ov <= 0.5:
+                    continue
+                score = ov - 0.02 * abs(cx[j] - cx[i]) / max(a.w, 1)
+                if score > best_score:
+                    best, best_score = j, score
+            if best >= 0:
+                edges.append((i, best, 0))
+
+    # one floor up: nearest window above that shares most of its width
+    ups: list[tuple[int, int, float]] = []
+    for i, a in enumerate(boxes):
+        best, dist = -1, None
+        for j, c in enumerate(boxes):
+            if j == i or c.cy >= a.cy - 0.5 * min(a.h, c.h):
+                continue
+            xov = (min(a.x1, c.x1) - max(a.x0, c.x0)) / min(a.w, c.w)
+            if xov < 0.4:
+                continue
+            d = a.cy - c.cy
+            if dist is None or d < dist:
+                best, dist = j, d
+        if best >= 0:
+            ups.append((i, best, dist))
+    linked = set()
+    pitch_all = float(np.median([d for _, _, d in ups])) if ups else float(np.median([b.h for b in boxes])) * 1.6
+    if len(ups) >= 3:
+        pitch = float(np.median([d for _, _, d in ups]))
+        for i, j, d in ups:
+            a, c = boxes[i], boxes[j]
+            if 0.55 * pitch <= d <= max(1.6 * pitch, 0.95 * (a.h + c.h)):
+                edges.append((i, j, 1))
+                linked.update((i, j))
+    is_grid = n >= 12 and len(linked) >= 0.6 * n
+
+    # walk the links: each connected group gets relative floor numbers
+    adj: dict[int, list[tuple[int, int]]] = {i: [] for i in range(n)}
+    for i, j, d in edges:
+        adj[i].append((j, d))
+        adj[j].append((i, -d))
+    level = [None] * n
+    comps: list[list[int]] = []
+    for root in sorted(range(n), key=lambda k: -len(adj[k])):
+        if level[root] is not None:
+            continue
+        level[root] = 0
+        comp, queue = [root], [root]
+        while queue:
+            u = queue.pop()
+            for v, d in adj[u]:
+                if level[v] is None:
+                    level[v] = level[u] + d
+                    comp.append(v)
+                    queue.append(v)
+        comps.append(comp)
+
+    # line the groups up with each other: the biggest group is the reference; every other group is
+    # shifted to agree with the placed windows it overlaps in height (or, failing that, the nearest one)
+    comps.sort(key=len, reverse=True)
+    placed = list(comps[0])
+    for comp in comps[1:]:
+        votes: dict[int, int] = {}
+        for u in comp:
+            a = boxes[u]
+            same = [p for p in placed if (min(a.y1, boxes[p].y1) - max(a.y0, boxes[p].y0)) > 0.5 * min(a.h, boxes[p].h)]
+            if same:  # level with a placed window: same floor as the nearest such one
+                p = min(same, key=lambda p: abs(cx[p] - cx[u]))
+                off = level[p] - level[u]
+            else:     # not level with anything placed: count whole floors up or down from the nearest one
+                p = min(placed, key=lambda p: abs(boxes[p].cy - a.cy) + 0.3 * abs(cx[p] - cx[u]))
+                dy = boxes[p].cy - a.cy  # positive = u is higher up the photo
+                steps = int(round(dy / pitch_all)) if pitch_all else 0
+                if steps == 0:
+                    steps = 1 if dy > 0 else -1
+                off = level[p] + steps - level[u]
+            votes[off] = votes.get(off, 0) + 1
+        off = max(votes, key=lambda k: votes[k])
+        for u in comp:
+            level[u] += off
+        placed.extend(comp)
+
+    lo = min(level)
+    rows: dict[int, list[Box]] = {}
+    for i, b in enumerate(boxes):
+        rows.setdefault(level[i] - lo, []).append(b)
+    return [rows[k] for k in sorted(rows)], is_grid
+
+
 def _rows_picture(img: Image.Image, rows: list[list[Box]]) -> Image.Image:
     """The photo with each row's windows outlined in its own colour and a big R1, R2... label beside it."""
     out = img.convert("RGB").copy()
@@ -336,9 +447,11 @@ ROWS_PROMPT = (
     "Rows on the same level are the same storey (a small window and a tall bay window beside it, a porch "
     "window and a main window). A dormer, gable or turret-top window is on the storey it sits at. A higher row "
     "is never on a lower storey than a row below it. Rows: {rows}. "
-    'Return JSON only: {{"side_from": 0, "side_to": 10, "storeys": {{"R1": 1, "R2": 2}}}}')
+    "3) TOTAL: how many storeys does that wall have, counting every level that has windows? "
+    'Return JSON only: {{"side_from": 0, "side_to": 10, "storeys": {{"R1": 1, "R2": 2}}, "total_storeys": 2}}')
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
+VOTES = int(os.environ.get("VOTES", "3"))
 
 
 def _openai_json(img: Image.Image, prompt: str, model=OPENAI_MODEL, timeout=90) -> str:
@@ -365,40 +478,63 @@ def _set_floors(rows: list[list[Box]], storeys: list[int]) -> int:
     for s in storeys:
         cur = max(cur, int(s) if s else cur)
         fixed.append(cur)
-    levels = sorted({lvl for row, lvl in zip(rows, fixed) if any(b.counted for b in row)}) or sorted(set(fixed))
+    # a floor needs at least one counted window the detector was SURE about; a level made only of unsure
+    # boxes (often a shadow or a porch rail) joins the nearest real floor instead of inventing one
+    levels = (sorted({lvl for row, lvl in zip(rows, fixed) if any(b.counted and b.conf >= CHECK_BELOW for b in row)})
+              or sorted({lvl for row, lvl in zip(rows, fixed) if any(b.counted for b in row)}) or sorted(set(fixed)))
     remap = {old: new for new, old in enumerate(levels, start=1)}
     for row, lvl in zip(rows, fixed):
-        at_or_below = [l for l in levels if l <= lvl]
-        target = at_or_below[-1] if at_or_below else levels[0]
+        target = min(levels, key=lambda l: (abs(l - lvl), l))  # nearest real floor, lower one on a tie
         for b in row:
             b.floor = remap[target]
     return len(levels)
 
 
-def assign_floors_llm(img: Image.Image, boxes: list[Box], provider="openai") -> int:
+def assign_floors_llm(img: Image.Image, boxes: list[Box], provider="openai") -> tuple[int, int | None]:
     """Geometry makes the rows; a vision model answers two small questions: which part of the photo is the
     one wall being quoted, and which storey each ROW is on. It never deletes or adds a window: windows off
     that wall are only marked other_side, and a click brings any of them back."""
     if not boxes:
-        return 0
-    rows = build_rows(boxes)
+        return 0, None
+    rows, is_grid = lattice_rows(boxes)
     prompt = ROWS_PROMPT.format(rows=", ".join(f"R{k + 1}" for k in range(len(rows))))
     picture = _rows_picture(img, rows)
-    text = _openai_json(picture, prompt) if provider == "openai" else _gemini_json(GEMINI_MODEL, picture, prompt)
-    ans = json.loads(text)
-    lo = min(max(float(ans.get("side_from", 0)), 0), 10) / 10 * img.width
-    hi = min(max(float(ans.get("side_to", 10)), 0), 10) / 10 * img.width
+    # Ask 3 times in parallel and take the middle answer: one reading of "which wall" or "which storey"
+    # varies from run to run, the median of three barely does. Same wall-clock time as one call.
+    from concurrent.futures import ThreadPoolExecutor
+    ask = (lambda: _openai_json(picture, prompt)) if provider == "openai" else (lambda: _gemini_json(GEMINI_MODEL, picture, prompt))
+    with ThreadPoolExecutor(VOTES) as ex:
+        futs = [ex.submit(ask) for _ in range(VOTES)]
+    answers = []
+    for f in futs:
+        try:
+            answers.append(json.loads(f.result()))
+        except Exception:
+            pass
+    if not answers:
+        raise RuntimeError("no usable answer from the vision model")
+    med = lambda xs: float(np.median(xs))
+    lo = min(max(med([float(a.get("side_from", 0)) for a in answers]), 0), 10) / 10 * img.width
+    hi = min(max(med([float(a.get("side_to", 10)) for a in answers]), 0), 10) / 10 * img.width
+    storey_votes = [[int(a.get("storeys", {}).get(f"R{k + 1}", 0) or 0) for a in answers] for k in range(len(rows))]
+    ans = {"storeys": {f"R{k + 1}": int(round(med(v))) for k, v in enumerate(storey_votes)}}
+    totals = [int(a["total_storeys"]) for a in answers if str(a.get("total_storeys", "")).isdigit()]
+    seen_storeys = int(round(med(totals))) if totals else None
     if hi - lo < 0.15 * img.width:  # an implausibly narrow answer: ignore it rather than drop most windows
         lo, hi = 0, img.width
     for b in boxes:
         cx = (b.x0 + b.x1) / 2
         b.other_side = bool(cx < lo or cx > hi)
-    return _set_floors(rows, [ans.get("storeys", {}).get(f"R{k + 1}", 0) for k in range(len(rows))])
+    if is_grid:  # a regular facade: the column count is more reliable than the model's reading
+        n = _set_floors(rows, list(range(1, len(rows) + 1)))
+    else:
+        n = _set_floors(rows, [ans.get("storeys", {}).get(f"R{k + 1}", 0) for k in range(len(rows))])
+    return n, seen_storeys  # seen_storeys: the model's own storey count, used as a cross-check
 
 
 def assign_floors_rows(boxes: list[Box]) -> int:
     """No-AI fallback: every row is its own storey."""
-    rows = build_rows(boxes)
+    rows, _ = lattice_rows(boxes)
     return _set_floors(rows, list(range(1, len(rows) + 1))) if rows else 0
 
 
@@ -423,6 +559,7 @@ class SideResult:
     boxes: list[Box]
     floors: list[FloorLine] = field(default_factory=list)
     note: str = ""
+    floors_check: bool = False  # the photo reads as a different number of storeys than were found
 
     @property
     def total(self): return sum(f.subtotal for f in self.floors)
@@ -499,13 +636,14 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     for b in boxes:
         b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
     res_note = ""
+    seen = None
     if floors == "ai":
         n = None
         for provider in ("openai", "gemini"):
             if not os.environ.get("OPENAI_API_KEY" if provider == "openai" else "GEMINI_API_KEY"):
                 continue
             try:
-                n = assign_floors_llm(img, boxes, provider)
+                n, seen = assign_floors_llm(img, boxes, provider)
                 break
             except Exception as e:  # never let one flaky API sink the quote
                 res_note += f"{provider} floors failed ({str(e)[:80]}). "
@@ -518,5 +656,10 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
         n = assign_floors(boxes)
     res = SideResult(name, boxes)
     res.note = res_note
+    if seen and n and seen != n:
+        res.floors_check = True
+        res.note = (res.note + " " if res.note else "") + (
+            f"Floor split needs a look: the building reads as {seen} storeys but {n} floors were found. "
+            "Check the colours on the photo; click a window to move it, or merge a floor into the one below.")
     res.floors = price(boxes, n, base, mult)
     return res

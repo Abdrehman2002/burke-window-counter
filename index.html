@@ -148,6 +148,17 @@
   .viewer { padding: 16px; border-right: 1px solid var(--line); display: grid; gap: 10px; align-content: start; }
   .canvaswrap { position: relative; border-radius: 12px; overflow: hidden; background: #0B1220; }
   canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
+  .boxmenu { position: absolute; z-index: 5; width: 200px; background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+             border-radius: 12px; box-shadow: 0 10px 30px rgba(8,20,45,.25); padding: 10px; display: grid; gap: 7px; }
+  .bm-h { font-weight: 600; font-size: 13px; }
+  .bm-lbl { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .bm-floors { display: flex; flex-wrap: wrap; gap: 5px; }
+  .bm-floors button { min-width: 32px; height: 30px; border-radius: 8px; border: 1.5px solid var(--c, var(--line)); background: var(--panel); font-weight: 600; font-size: 13px; }
+  .bm-floors button.on { background: var(--c); color: #fff; }
+  .bm-floors button:last-child { border-style: dashed; border-color: var(--line); color: var(--muted); font-weight: 500; }
+  .bm-count { border: 1px solid var(--line); background: var(--sunk); border-radius: 8px; padding: 7px; font-size: 13px; }
+  .bm-count:hover, .bm-floors button:hover { border-color: var(--accent); }
+  .mini { border: 0; background: none; color: var(--accent); padding: 0; font-size: 12px; font-weight: 500; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; border: 2px solid; }
   .floors { padding: 16px 18px; display: grid; gap: 12px; align-content: start; }
@@ -411,7 +422,7 @@ async function run() {
       const j = await r.json().catch(() => ({ error: `the server answered ${r.status}` }));
       if (!r.ok || j.error) throw new Error(j.error || `the server answered ${r.status}`);
       const img = new Image(); img.src = S.photos[s]; await img.decode();
-      out[s] = { res: j, img, removed: edgeSet(j), adjust: {}, extra: 0 };
+      out[s] = sideState(j, img);
       S.running[s] = "ok";
     } catch (e) { S.running[s] = "err:" + e.message; }
     renderWork();
@@ -433,27 +444,38 @@ async function run() {
 // not counted (dashed); a click brings one back.
 const skipped = b => !!(b.edge || b.other_side);
 const edgeSet = r => new Set(r.boxes.map((b, i) => skipped(b) ? i : -1).filter(i => i >= 0));
+// Everything the viewer can change on one side: which boxes count, which floor each box is on, per-floor
+// +/- adjustments, and how many floors there are.
+const sideState = (res, img) => ({ res, img, removed: edgeSet(res), adjust: {}, fl: res.boxes.map(b => b.floor), nf: res.n_floors });
 
 /* ================= quote maths (all in the browser, so it's instant) ================= */
 function floorsOf(side) {
-  const q = S.quote.sides[side], n = q.res.n_floors + q.extra, lines = [];
-  for (let f = 1; f <= n; f++) {
-    const idx = q.res.boxes.map((b, i) => i).filter(i => q.res.boxes[i].floor === f);
+  const q = S.quote.sides[side], lines = [];
+  for (let f = 1; f <= q.nf; f++) {
+    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === f);
     const kept = idx.filter(i => !q.removed.has(i));
     const adj = q.adjust[f] || 0;
     const windows = Math.max(0, kept.length + adj);
-    lines.push({ floor: f, detected: idx.length, windows, each: rate(f), subtotal: windows * rate(f),
-                 edited: adj !== 0 || f > q.res.n_floors || idx.some(i => q.removed.has(i) !== skipped(q.res.boxes[i])),
+    lines.push({ floor: f, detected: kept.length, windows, each: rate(f), subtotal: windows * rate(f),
                  check: kept.some(i => q.res.boxes[i].conf < CHECK_BELOW) });
   }
   return lines;
 }
+// Has the viewer changed anything on this side?
+function sideEdited(side) {
+  const q = S.quote.sides[side], r = q.res;
+  return q.nf !== r.n_floors || Object.values(q.adjust).some(v => v) ||
+         r.boxes.some((b, i) => q.fl[i] !== b.floor || q.removed.has(i) !== skipped(b));
+}
+// Things to check on a side: floors holding an unsure box, plus one if the floor split itself is doubtful
+// and the viewer hasn't touched it yet.
+const sideChecks = s => floorsOf(s).filter(f => f.check).length + (S.quote.sides[s].res.floors_check && !sideEdited(s) ? 1 : 0);
 const sideTotal = s => floorsOf(s).reduce((a, f) => a + f.subtotal, 0);
 const sideWindows = s => floorsOf(s).reduce((a, f) => a + f.windows, 0);
 const quoteTotal = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideTotal(s), 0);
 const quoteWindows = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideWindows(s), 0);
-const quoteChecks = () => Object.keys(S.quote.sides).reduce((a, s) => a + floorsOf(s).filter(f => f.check).length, 0);
-const quoteEdited = () => Object.keys(S.quote.sides).some(s => floorsOf(s).some(f => f.edited));
+const quoteChecks = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideChecks(s), 0);
+const quoteEdited = () => Object.keys(S.quote.sides).some(sideEdited);
 
 /* ================= drawing ================= */
 function draw(canvas, side) {
@@ -464,7 +486,7 @@ function draw(canvas, side) {
   g.drawImage(img, 0, 0);
   const lines = floorsOf(side);
   for (const fl of lines) {
-    const idx = r.boxes.map((b, i) => i).filter(i => r.boxes[i].floor === fl.floor);
+    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === fl.floor);
     if (!idx.length) continue;
     const col = colour(fl.floor);
     const top = Math.min(...idx.map(i => r.boxes[i].y0)) * k, bot = Math.max(...idx.map(i => r.boxes[i].y1)) * k;
@@ -488,7 +510,8 @@ function draw(canvas, side) {
   }
 }
 
-// Click a box on the photo to remove it (or bring it back). Smallest box under the pointer wins.
+// Click a box on the photo: a small menu to move that window to another floor, or stop counting it.
+// Smallest box under the pointer wins.
 function onCanvasClick(e, side) {
   const cv = e.currentTarget, rect = cv.getBoundingClientRect(), q = S.quote.sides[side], r = q.res;
   const x = (e.clientX - rect.left) / rect.width * r.width, y = (e.clientY - rect.top) / rect.height * r.height;
@@ -496,9 +519,46 @@ function onCanvasClick(e, side) {
   r.boxes.forEach((b, i) => {
     if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) { const a = (b.x1 - b.x0) * (b.y1 - b.y0); if (a < area) { area = a; best = i; } }
   });
+  closeMenu();
   if (best < 0) return;
-  q.removed.has(best) ? (q.removed.delete(best), toast("Counted")) : (q.removed.add(best), toast("Not counted. Click it again to undo."));
-  renderWork();
+  const counted = !q.removed.has(best), cur = q.fl[best];
+  const m = document.createElement("div");
+  m.className = "boxmenu"; m.id = "boxmenu"; m.setAttribute("role", "dialog"); m.setAttribute("aria-label", "Change this window");
+  m.innerHTML = `<div class="bm-h">This window</div>
+    <div class="bm-lbl">Floor</div>
+    <div class="bm-floors">${Array.from({ length: q.nf }, (_, k) => k + 1).map(f =>
+      `<button type="button" data-f="${f}" class="${f === cur ? "on" : ""}" style="--c:${colour(f)}">${f}</button>`).join("")}
+      <button type="button" data-f="${q.nf + 1}" title="A new floor above floor ${q.nf}">+ new</button></div>
+    <button type="button" class="bm-count">${counted ? "Don't count this" : "Count this window"}</button>`;
+  const wrap = cv.parentElement, wr = wrap.getBoundingClientRect();
+  m.style.left = Math.max(4, Math.min(e.clientX - wr.left, wr.width - 210)) + "px";
+  m.style.top = Math.max(4, Math.min(e.clientY - wr.top + 10, wr.height - 150)) + "px";
+  wrap.appendChild(m);
+  m.querySelectorAll(".bm-floors button").forEach(btn => btn.addEventListener("click", ev => {
+    ev.stopPropagation();
+    const f = +btn.dataset.f;
+    q.fl[best] = f; if (f > q.nf) q.nf = f;
+    q.removed.delete(best);
+    closeMenu(); renderWork(); toast(`Moved to floor ${f}`);
+  }));
+  m.querySelector(".bm-count").addEventListener("click", ev => {
+    ev.stopPropagation();
+    counted ? q.removed.add(best) : q.removed.delete(best);
+    closeMenu(); renderWork(); toast(counted ? "Not counted" : "Counted");
+  });
+  m.querySelector("button").focus();
+}
+function closeMenu() { $("boxmenu")?.remove(); }
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
+document.addEventListener("click", e => { if (!e.target.closest("#boxmenu") && e.target.id !== "cv") closeMenu(); });
+
+// Merge floor f into the floor below it: its windows move down, and every floor above shifts down one.
+function mergeDown(side, f) {
+  const q = S.quote.sides[side];
+  q.fl = q.fl.map(v => v >= f ? v - 1 : v);
+  const adj = {};
+  for (const [k, v] of Object.entries(q.adjust)) { const n = +k; const t = n >= f ? n - 1 : n; adj[t] = (adj[t] || 0) + v; }
+  q.adjust = adj; q.nf = Math.max(1, q.nf - 1);
 }
 
 /* ================= workspace ================= */
@@ -539,13 +599,13 @@ function renderWork() {
         <span><b class="num">${quoteWindows()}</b> windows</span>
         <span><b class="num">${Math.max(...sides.map(s => floorsOf(s).length))}</b> floors</span>
         <span><b class="num">${sides.length}</b> side${sides.length > 1 ? "s" : ""}</span>
-        ${checks ? `<span class="pill warn">${checks} floor${checks > 1 ? "s" : ""} to check</span>` : `<span class="pill ok">Nothing flagged</span>`}
+        ${checks ? `<span class="pill warn">${checks} thing${checks > 1 ? "s" : ""} to check</span>` : `<span class="pill ok">Nothing flagged</span>`}
         ${quoteEdited() ? `<span class="pill edit">Adjusted by hand</span>` : ""}
         <span>counted in <b class="num">${q.seconds.toFixed(1)}s</b></span>
       </div>
       <div class="tabs" role="tablist">
         ${tabs.map(t => `<button class="tab ${t === S.tab ? "on" : ""}" role="tab" aria-selected="${t === S.tab}" data-t="${t}">
-          ${t === "Summary" ? "Summary" : `${t}<span class="amt num">${money(sideTotal(t))}</span>${floorsOf(t).some(f => f.check) ? '<span class="wdot" title="Has floors to check"></span>' : ""}`}</button>`).join("")}
+          ${t === "Summary" ? "Summary" : `${t}<span class="amt num">${money(sideTotal(t))}</span>${sideChecks(t) ? '<span class="wdot" title="Has something to check"></span>' : ""}`}</button>`).join("")}
       </div>
       <div id="tabbody"></div>
     </div>`;
@@ -563,7 +623,7 @@ function renderSide(side) {
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
           <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
           <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (another side, next door, or removed)</span>
-          <span>Click any box to remove it or bring it back.</span>
+          <span>Click any window to move it to another floor or stop counting it.</span>
         </div>
       </div>
       <div class="floors">
@@ -572,7 +632,7 @@ function renderSide(side) {
           <div class="frow">
             <span class="sw" style="background:${colour(f.floor)}"></span>
             <div><div class="nm">Floor ${f.floor} ${f.check ? '<span class="pill warn">check</span>' : ""}</div>
-              <div class="sub num">${money(f.each)} each${f.windows !== f.detected ? ` · detected ${f.detected}` : ""}</div></div>
+              <div class="sub num">${money(f.each)} each${f.windows !== f.detected ? ` · ${f.detected} boxed` : ""}${f.floor > 1 ? ` · <button class="mini" type="button" data-merge="${f.floor}" title="Floor ${f.floor} is really part of floor ${f.floor - 1}">merge ↓</button>` : ""}</div></div>
             <div class="step"><button type="button" data-f="${f.floor}" data-d="-1" aria-label="One fewer window on floor ${f.floor}">−</button>
               <output class="num">${f.windows}</output>
               <button type="button" data-f="${f.floor}" data-d="1" aria-label="One more window on floor ${f.floor}">+</button></div>
@@ -580,9 +640,9 @@ function renderSide(side) {
           </div>`).join("")}</div>
         <button class="linkbtn" id="addfloor" type="button">+ Add a floor it missed</button>
         <div class="fsum"><span>${sideWindows(side)} windows</span><b class="num">${money(sideTotal(side))}</b></div>
+        ${q.res.floors_check && !sideEdited(side) ? `<div class="hint warn"><b>Check the floors.</b> ${esc(q.res.note)}</div>` : (q.res.note && !q.res.floors_check ? `<div class="hint">${esc(q.res.note)}</div>` : "")}
         ${checks ? `<div class="hint warn">${checks} floor${checks > 1 ? "s have" : " has"} a window the detector wasn't sure about (amber). Look at those before sending.</div>` : ""}
-        ${q.res.note ? `<div class="hint">${esc(q.res.note)}</div>` : ""}
-        ${lines.some(f => f.edited) ? `<button class="linkbtn" id="undo" type="button">Undo my changes on this side</button>` : ""}
+        ${sideEdited(side) ? `<button class="linkbtn" id="undo" type="button">Undo my changes on this side</button>` : ""}
       </div>
     </div>`;
   const cv = $("cv"); draw(cv, side); cv.addEventListener("click", e => onCanvasClick(e, side));
@@ -591,8 +651,11 @@ function renderSide(side) {
     if (d < 0 && line.windows === 0) return;
     q.adjust[f] = (q.adjust[f] || 0) + d; renderWork();
   }));
-  $("addfloor").addEventListener("click", () => { q.extra++; q.adjust[q.res.n_floors + q.extra] = 1; renderWork(); });
-  $("undo")?.addEventListener("click", () => { q.removed = edgeSet(q.res); q.adjust = {}; q.extra = 0; renderWork(); toast("Back to the detected counts"); });
+  $("addfloor").addEventListener("click", () => { q.nf++; q.adjust[q.nf] = 1; renderWork(); });
+  $("tabbody").querySelectorAll("[data-merge]").forEach(b => b.addEventListener("click", () => {
+    const f = +b.dataset.merge; mergeDown(side, f); renderWork(); toast(`Floor ${f} merged into floor ${f - 1}`);
+  }));
+  $("undo")?.addEventListener("click", () => { Object.assign(q, sideState(q.res, q.img)); renderWork(); toast("Back to the detected counts"); });
 }
 
 function summaryRows() {
@@ -676,7 +739,7 @@ $("go").addEventListener("click", run);
   try {
     const ex = await (await fetch("photos/example.json")).json();
     const img = new Image(); img.src = ex.photo; await img.decode();
-    S.quote = { name: "Example: townhouse with dormers", sides: { Front: { res: ex, img, removed: edgeSet(ex), adjust: {}, extra: 0 } },
+    S.quote = { name: "Example: townhouse with dormers", sides: { Front: sideState(ex, img) },
                 seconds: ex.seconds, example: true };
     S.tab = "Front";
   } catch {}
