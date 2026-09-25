@@ -46,6 +46,7 @@ class Box:
     y1: float
     conf: float
     floor: int = 0
+    edge: bool = False  # cut off by the left/right edge of the photo: almost always the building next door
 
     @property
     def w(self): return self.x1 - self.x0
@@ -280,8 +281,9 @@ STOREY_PROMPT = (
     "For EVERY numbered box, say which storey of the building it is on: 1 = ground floor, 2 = the floor "
     "above, and so on. Windows in a gable, dormer or turret top count as the storey they sit at. "
     "Use the building's real floor levels, not the size of the window: a small window and a tall bay "
-    "window on the same level are the same storey. If a box is not a window on the main building "
-    "(a car, a neighbouring building, a sign, a door), give storey 0. "
+    "window on the same level are the same storey. The MAIN building is the one the photo is centred on. "
+    "Any box on a different building, even one attached to it on the left or right, gets storey 0, and so "
+    "does anything that is not a window (a car, a sign, a door). "
     'Boxes are numbered 0 to {last}. Return JSON only: {{"storeys": {{"0": 1, "1": 2, ...}}}}')
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
@@ -356,7 +358,7 @@ class SideResult:
 def price(boxes: list[Box], n_floors: int, base=BASE_PRICE, mult=MULTIPLIER) -> list[FloorLine]:
     lines = []
     for n in range(1, n_floors + 1):
-        fb = [b for b in boxes if b.floor == n]
+        fb = [b for b in boxes if b.floor == n and not b.edge]
         each = base * mult ** (n - 1)
         lines.append(FloorLine(n, len(fb), each, len(fb) * each, any(b.conf < CHECK_BELOW for b in fb)))
     return lines
@@ -382,6 +384,11 @@ def draw(img: Image.Image, res: SideResult) -> Image.Image:
     f = _font(max(14, W // 60))
     for fl in res.floors:
         fb = [b for b in res.boxes if b.floor == fl.floor]
+        if not fb:
+            continue
+        for b in [b for b in fb if b.edge]:  # not counted: dashed white
+            od.rectangle([b.x0, b.y0, b.x1, b.y1], outline=(255, 255, 255, 200), width=lw)
+        fb = [b for b in fb if not b.edge]
         if not fb:
             continue
         col = FLOOR_COLOURS[(fl.floor - 1) % len(FLOOR_COLOURS)]
@@ -429,6 +436,11 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
         n = assign_floors_geometric(boxes)
     else:
         n = assign_floors(boxes)
+    # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time
+    # (the photo is meant to frame the whole side). Kept and drawn, but not counted unless someone adds it back.
+    W = img.width
+    for b in boxes:
+        b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
     res = SideResult(name, boxes)
     res.note = res_note
     res.floors = price(boxes, n, base, mult)

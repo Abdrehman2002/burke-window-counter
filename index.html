@@ -408,7 +408,7 @@ async function run() {
       const j = await r.json().catch(() => ({ error: `the server answered ${r.status}` }));
       if (!r.ok || j.error) throw new Error(j.error || `the server answered ${r.status}`);
       const img = new Image(); img.src = S.photos[s]; await img.decode();
-      out[s] = { res: j, img, removed: new Set(), adjust: {}, extra: 0 };
+      out[s] = { res: j, img, removed: edgeSet(j), adjust: {}, extra: 0 };
       S.running[s] = "ok";
     } catch (e) { S.running[s] = "err:" + e.message; }
     renderWork();
@@ -426,6 +426,9 @@ async function run() {
   renderWork();
 }
 
+// Windows cut off by the photo's edge start out not counted (dashed); a click brings one back.
+const edgeSet = r => new Set(r.boxes.map((b, i) => b.edge ? i : -1).filter(i => i >= 0));
+
 /* ================= quote maths (all in the browser, so it's instant) ================= */
 function floorsOf(side) {
   const q = S.quote.sides[side], n = q.res.n_floors + q.extra, lines = [];
@@ -435,7 +438,7 @@ function floorsOf(side) {
     const adj = q.adjust[f] || 0;
     const windows = Math.max(0, kept.length + adj);
     lines.push({ floor: f, detected: idx.length, windows, each: rate(f), subtotal: windows * rate(f),
-                 edited: adj !== 0 || kept.length !== idx.length || f > q.res.n_floors,
+                 edited: adj !== 0 || f > q.res.n_floors || idx.some(i => q.removed.has(i) !== !!q.res.boxes[i].edge),
                  check: kept.some(i => q.res.boxes[i].conf < CHECK_BELOW) });
   }
   return lines;
@@ -489,7 +492,7 @@ function onCanvasClick(e, side) {
     if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) { const a = (b.x1 - b.x0) * (b.y1 - b.y0); if (a < area) { area = a; best = i; } }
   });
   if (best < 0) return;
-  q.removed.has(best) ? (q.removed.delete(best), toast("Window added back")) : (q.removed.add(best), toast("Removed. Click it again to undo."));
+  q.removed.has(best) ? (q.removed.delete(best), toast("Counted")) : (q.removed.add(best), toast("Not counted. Click it again to undo."));
   renderWork();
 }
 
@@ -554,7 +557,7 @@ function renderSide(side) {
         <div class="legend">
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
           <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
-          <span><i style="border-color:#FF5050;border-style:dashed"></i>Removed by you</span>
+          <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (cut off at the edge, or removed)</span>
           <span>Click any box to remove it or bring it back.</span>
         </div>
       </div>
@@ -584,7 +587,7 @@ function renderSide(side) {
     q.adjust[f] = (q.adjust[f] || 0) + d; renderWork();
   }));
   $("addfloor").addEventListener("click", () => { q.extra++; q.adjust[q.res.n_floors + q.extra] = 1; renderWork(); });
-  $("undo")?.addEventListener("click", () => { q.removed.clear(); q.adjust = {}; q.extra = 0; renderWork(); toast("Back to the detected counts"); });
+  $("undo")?.addEventListener("click", () => { q.removed = edgeSet(q.res); q.adjust = {}; q.extra = 0; renderWork(); toast("Back to the detected counts"); });
 }
 
 function summaryRows() {
@@ -668,7 +671,7 @@ $("go").addEventListener("click", run);
   try {
     const ex = await (await fetch("photos/example.json")).json();
     const img = new Image(); img.src = ex.photo; await img.decode();
-    S.quote = { name: "Example: townhouse with dormers", sides: { Front: { res: ex, img, removed: new Set(), adjust: {}, extra: 0 } },
+    S.quote = { name: "Example: townhouse with dormers", sides: { Front: { res: ex, img, removed: edgeSet(ex), adjust: {}, extra: 0 } },
                 seconds: ex.seconds, example: true };
     S.tab = "Front";
   } catch {}
