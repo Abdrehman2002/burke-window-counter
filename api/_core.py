@@ -49,6 +49,7 @@ class Box:
     edge: bool = False  # cut off by the left/right edge of the photo: almost always the building next door
     other_side: bool = False  # not on the one wall this photo is quoting (a second side, or next door)
     weak: bool = False  # the detector was under WEAK_BELOW sure: shown as a suggestion, not counted
+    region: int = 0  # which building / wall of the photo this window belongs to (see Region)
 
     @property
     def counted(self): return not (self.edge or self.other_side or self.weak)
@@ -437,6 +438,15 @@ def vp_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
         cx = (b.x0 + b.x1) / 2
         t0, t1 = land(cx, b.y0), land(cx, b.y1)
         spans.append((min(t0, t1), max(t0, t1)))
+    # Windows that sit on none of this wall's floor lines (another wall seen at a corner, a stray box)
+    # would bridge floors together. Build the floors from the windows that do, then hang the rest on the
+    # floor whose landed position is nearest.
+    core = set(range(n))
+    if v is not None and len(pairs) >= 6:
+        fits = _pair_fits(boxes, pairs, v)
+        on_line = {i for (i, j), ok in zip(pairs, fits) if ok for i in (i, j)}
+        if len(on_line) >= 0.6 * n:
+            core = on_line
     parent = list(range(n))
 
     def find(i):
@@ -444,12 +454,18 @@ def vp_rows(boxes: list[Box]) -> tuple[list[list[Box]], bool]:
             parent[i] = parent[parent[i]]
             i = parent[i]
         return i
-    for i in range(n):
-        for j in range(i + 1, n):
+    core_l = sorted(core)
+    for a_i, i in enumerate(core_l):
+        for j in core_l[a_i + 1:]:
             (a0, a1), (b0, b1) = spans[i], spans[j]
             ov = min(a1, b1) - max(a0, b0)
             if ov > 0.5 * min(a1 - a0, b1 - b0):
                 parent[find(i)] = find(j)
+    mid = [(t0 + t1) / 2 for t0, t1 in spans]
+    for i in range(n):
+        if i not in core and core_l:
+            j = min(core_l, key=lambda c: abs(mid[c] - mid[i]))
+            parent[find(i)] = find(j)
     groups: dict[int, list[int]] = {}
     for i in range(n):
         groups.setdefault(find(i), []).append(i)
@@ -692,6 +708,271 @@ def _extend_wall(boxes: list[Box]):
                     break
 
 
+STOREYS_PROMPT = (
+    "This photo shows ONE building wall for a window-cleaning quote. Its windows have been grouped into "
+    "horizontal rows by height; each row's windows are outlined in one colour and labelled R1, R2 ... from "
+    "the BOTTOM up. (Ignore the yellow grid lines.) "
+    "1) STOREYS: for each row, which storey of the wall is it on? Storey 1 is the lowest level with windows. "
+    "Rows on the same level are the same storey (a small window and a tall bay window beside it, a porch "
+    "window and a main window). A dormer, gable or turret-top window is on the storey it sits at. A higher row "
+    "is never on a lower storey than a row below it. Rows: {rows}. "
+    "2) TOTAL: how many storeys does this wall have, counting every level that has windows? "
+    'Return JSON only: {{"storeys": {{"R1": 1, "R2": 2}}, "total_storeys": 2}}')
+
+
+def _ask_votes(picture: Image.Image, prompt: str, provider: str) -> list[dict]:
+    """Ask VOTES times in parallel; one reading varies run to run, the median of three barely does."""
+    from concurrent.futures import ThreadPoolExecutor
+    ask = (lambda: _openai_json(picture, prompt)) if provider == "openai" else (lambda: _gemini_json(GEMINI_MODEL, picture, prompt))
+    with ThreadPoolExecutor(VOTES) as ex:
+        futs = [ex.submit(ask) for _ in range(VOTES)]
+    answers = []
+    for f in futs:
+        try:
+            answers.append(json.loads(f.result()))
+        except Exception:
+            pass
+    if not answers:
+        raise RuntimeError("no usable answer from the vision model")
+    return answers
+
+
+def floors_for_wall(img: Image.Image, boxes: list[Box], provider="openai") -> tuple[int, int | None]:
+    """Floors for ONE wall the viewer picked: geometry makes the rows, the model says which rows share a
+    storey (a tall regular facade trusts the geometry instead). The model never adds or removes a window."""
+    live = [b for b in boxes if b.counted]
+    if not live:
+        for b in boxes:
+            b.floor = 1
+        return 0, None
+    rows, is_grid = vp_rows(live)
+    if len(rows) == 1:
+        n = _set_floors(rows, [1])
+        seen = None
+    else:
+        med = lambda xs: float(np.median(xs))
+        seen = None
+        storeys = list(range(1, len(rows) + 1))
+        if not is_grid:
+            xs0 = min(b.x0 for b in live); xs1 = max(b.x1 for b in live)
+            ys0 = min(b.y0 for b in live); ys1 = max(b.y1 for b in live)
+            mx, my = 0.25 * (xs1 - xs0) + 40, 0.25 * (ys1 - ys0) + 40
+            crop = (int(max(0, xs0 - mx)), int(max(0, ys0 - my)), int(min(img.width, xs1 + mx)), int(min(img.height, ys1 + my)))
+            picture = _rows_picture(img, rows).crop(crop)
+            prompt = STOREYS_PROMPT.format(rows=", ".join(f"R{k + 1}" for k in range(len(rows))))
+            answers = _ask_votes(picture, prompt, provider)
+            storeys = [int(round(med([int(a.get("storeys", {}).get(f"R{k + 1}", 0) or 0) for a in answers])))
+                       for k in range(len(rows))]
+            totals = [int(a["total_storeys"]) for a in answers if str(a.get("total_storeys", "")).isdigit()]
+            seen = int(round(med(totals))) if totals else None
+        n = _set_floors(rows, storeys)
+    if n >= 3:
+        n = _merge_orphan_floors(live)
+        if n >= 3:
+            n = _merge_close_floors(live)
+    if seen and seen < n:
+        n = _merge_to(live, seen)
+    # windows not counted (edge, weak) still need a floor in case someone clicks them in
+    for b in boxes:
+        if not b.counted:
+            near = min(live, key=lambda c: abs(c.cy - b.cy) + 0.2 * abs((c.x0 + c.x1) / 2 - (b.x0 + b.x1) / 2))
+            b.floor = near.floor
+    return n, seen
+
+
+def segment_buildings(img: Image.Image, thresh=0.4) -> list[list[list[float]]]:
+    """SAM 3 'building' instances: one polygon (list of [x, y]) per separate building, biggest first.
+    Near-duplicates are dropped. Walls of the SAME building are not split here (see _split_walls)."""
+    prompts = [{"type": "text", "text": "building"}]
+    r = requests.post(
+        "https://serverless.roboflow.com/sam3/concept_segment",
+        headers={"Authorization": f"Bearer {os.environ['ROBOFLOW_API_KEY']}"},
+        json={"image": {"type": "base64", "value": _jpeg_b64(img)}, "prompts": prompts,
+              "output_prob_thresh": thresh, "format": "polygon"},
+        timeout=120)
+    r.raise_for_status()
+    polys = []
+    for p in r.json()["prompt_results"][0]["predictions"]:
+        rings = [m for m in p["masks"] if len(m) >= 3]
+        if rings:
+            polys.append(max(rings, key=lambda m: _poly_area(m)))
+    polys.sort(key=_poly_area, reverse=True)
+    kept, masks = [], []
+    for poly in polys:
+        m = _raster(poly, img.size)
+        if any((m & k).sum() > 0.6 * min(m.sum(), k.sum()) for k in masks):
+            continue
+        kept.append(poly)
+        masks.append(m)
+    return kept
+
+
+def _poly_area(poly) -> float:
+    a = np.array(poly, dtype=float)
+    return 0.5 * abs(np.dot(a[:, 0], np.roll(a[:, 1], 1)) - np.dot(a[:, 1], np.roll(a[:, 0], 1)))
+
+
+_RSCALE = 4  # masks are rasterised at 1/4 size: plenty to decide which building a window sits on
+
+
+def _raster(poly, size) -> np.ndarray:
+    W, H = size
+    im = Image.new("L", (W // _RSCALE + 1, H // _RSCALE + 1), 0)
+    ImageDraw.Draw(im).polygon([(x / _RSCALE, y / _RSCALE) for x, y in poly], fill=1)
+    return np.array(im, dtype=bool)
+
+
+def _hull(points) -> list[list[float]]:
+    """Convex hull (monotone chain), used as the outline of a wall made of its windows."""
+    pts = sorted(set((float(x), float(y)) for x, y in points))
+    if len(pts) < 3:
+        return [list(p) for p in pts]
+    cross = lambda o, a, b: (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return [list(p) for p in lower[:-1] + upper[:-1]]
+
+
+def _pair_fits(boxes: list[Box], pairs, v, tol_deg=4.0) -> list[bool]:
+    """Does each side-by-side pair run toward vanishing point v (i.e. lie along a floor of that wall)?"""
+    out = []
+    for i, j in pairs:
+        p = np.array([(boxes[i].x0 + boxes[i].x1) / 2, boxes[i].cy])
+        q = np.array([(boxes[j].x0 + boxes[j].x1) / 2, boxes[j].cy])
+        d, mid = q - p, (p + q) / 2
+        to = v[:2] / v[2] - mid if abs(v[2]) > 1e-9 else v[:2]
+        c = abs(np.dot(d, to)) / (np.linalg.norm(d) * np.linalg.norm(to) + 1e-12)
+        out.append(bool(c > np.cos(np.radians(tol_deg))))
+    return out
+
+
+def _corner_x(boxes: list[Box]) -> float | None:
+    """Where does a corner photo turn from one wall to the other?
+
+    Fit the floors' vanishing point for the whole building. On one wall the side-by-side pairs fit it
+    everywhere (a few stray diagonal pairs aside), so there is no corner. At a real corner there is a
+    vertical line with pairs that fit on one side and pairs that do not on the other, and those others
+    agree on a vanishing point of their own. None when the building shows a single wall."""
+    pairs = _same_floor_pairs(boxes)
+    if len(pairs) < 8:
+        return None
+    v1 = _floor_vanishing_point(boxes, pairs)
+    if v1 is None:
+        return None
+    fit1 = np.array(_pair_fits(boxes, pairs, v1))
+    mids = np.array([((boxes[i].x0 + boxes[i].x1) / 2 + (boxes[j].x0 + boxes[j].x1) / 2) / 2 for i, j in pairs])
+    order = np.argsort(mids)
+    mids, fit1 = mids[order], fit1[order]
+    pairs = [pairs[k] for k in order]
+    best = None
+    for k in range(4, len(pairs) - 3):  # at least 4 pairs each side
+        for main_left in (True, False):
+            A = fit1[:k] if main_left else fit1[k:]
+            B = fit1[k:] if main_left else fit1[:k]
+            score = A.mean() - B.mean()
+            if best is None or score > best[0]:
+                best = (score, k, main_left, A.mean(), B.mean(), len(B))
+    if best is None:
+        return None
+    score, k, main_left, ra, rb, nb = best
+    if not (ra >= 0.6 and rb <= 0.35 and nb >= 4):
+        return None
+    other = pairs[k:] if main_left else pairs[:k]
+    v2 = _floor_vanishing_point(boxes, other)
+    if v2 is None or np.mean(_pair_fits(boxes, other, v2)) < 0.6:
+        return None
+    return float((mids[k - 1] + mids[k]) / 2)
+
+
+def _clip_x(poly, sx: float, keep_left: bool):
+    """Cut a polygon along the vertical line x = sx (Sutherland-Hodgman), keeping one side."""
+    inside = (lambda p: p[0] <= sx) if keep_left else (lambda p: p[0] >= sx)
+    out = []
+    n = len(poly)
+    for k in range(n):
+        cur, nxt = poly[k], poly[(k + 1) % n]
+        ci, ni = inside(cur), inside(nxt)
+        if ci:
+            out.append(cur)
+        if ci != ni:
+            t = (sx - cur[0]) / ((nxt[0] - cur[0]) or 1e-9)
+            out.append([sx, cur[1] + t * (nxt[1] - cur[1])])
+    return out
+
+
+def _split_walls(boxes: list[Box]) -> tuple[list[list[Box]], float | None]:
+    """Split one building's windows at the corner line, if the photo shows two of its walls."""
+    firm = [b for b in boxes if not b.weak] or boxes
+    if len(firm) < 8:
+        return [boxes], None
+    sx = _corner_x(firm)
+    if sx is None:
+        return [boxes], None
+    left = [b for b in boxes if (b.x0 + b.x1) / 2 < sx]
+    right = [b for b in boxes if (b.x0 + b.x1) / 2 >= sx]
+    if sum(not b.weak for b in left) < 4 or sum(not b.weak for b in right) < 4:
+        return [boxes], None
+    return [left, right], sx
+
+
+def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
+    """Every building (and, in a corner shot, every wall) in the photo, numbered left to right, each with
+    its windows. Sets box.region. The viewer picks which ones this side's quote covers."""
+    masks = [_raster(p, img.size) for p in polys]
+    groups: dict[int, list[Box]] = {}
+    for b in boxes:
+        k = -1
+        if masks:
+            x = int(((b.x0 + b.x1) / 2) / _RSCALE)
+            y = int(b.cy / _RSCALE)
+            hits = [i for i, m in enumerate(masks) if 0 <= y < m.shape[0] and 0 <= x < m.shape[1] and m[y, x]]
+            if hits:
+                k = min(hits, key=lambda i: masks[i].sum())  # the smaller building in front wins
+            else:
+                def dist(i):
+                    ys, xs = np.nonzero(masks[i])
+                    return float(np.min((xs - x) ** 2 + (ys - y) ** 2)) if len(xs) else 1e18
+                k = min(range(len(masks)), key=dist)
+        groups.setdefault(k, []).append(b)
+    regions = []
+    for k, bs in groups.items():
+        walls, sx = _split_walls(bs)
+        for wi, wall in enumerate(walls):
+            if k >= 0:
+                poly = polys[k] if sx is None else _clip_x(polys[k], sx, keep_left=(wi == 0))
+            else:
+                pts = [(x, y) for b in wall for x, y in ((b.x0, b.y0), (b.x1, b.y0), (b.x1, b.y1), (b.x0, b.y1))]
+                poly = _hull(pts)
+            if len(poly) < 3:
+                pts = [(x, y) for b in wall for x, y in ((b.x0, b.y0), (b.x1, b.y0), (b.x1, b.y1), (b.x0, b.y1))]
+                poly = _hull(pts)
+            regions.append({"boxes": wall, "polygon": [[float(x), float(y)] for x, y in poly],
+                            "wall": (wi if len(walls) > 1 else None), "building": k})
+    regions.sort(key=lambda r: np.median([(b.x0 + b.x1) / 2 for b in r["boxes"]]))
+    bnum = {}
+    for i, r in enumerate(regions):
+        r["id"] = i + 1
+        for b in r["boxes"]:
+            b.region = i + 1
+    for r in regions:
+        bnum.setdefault(r["building"], len(bnum) + 1)
+    multi_b = len(bnum) > 1
+    for r in regions:
+        label = f"Building {bnum[r['building']]}" if multi_b else "Building"
+        if r["wall"] is not None:
+            label += f", wall {'AB'[r['wall']]}"
+        r["label"] = label
+        r["windows"] = sum(1 for b in r["boxes"] if b.counted)
+    return regions
+
+
 def assign_floors_llm(img: Image.Image, boxes: list[Box], provider="openai") -> tuple[int, int | None]:
     """Geometry makes the rows; a vision model answers two small questions: which part of the photo is the
     one wall being quoted, and which storey each ROW is on. It never deletes or adds a window: windows off
@@ -853,6 +1134,8 @@ class SideResult:
     floors: list[FloorLine] = field(default_factory=list)
     note: str = ""
     floors_check: bool = False  # the photo reads as a different number of storeys than were found
+    regions: list = field(default_factory=list)   # buildings / walls in the photo (see find_regions)
+    selected: list = field(default_factory=list)  # region ids the quote covers by default
 
     @property
     def total(self): return sum(f.subtotal for f in self.floors)
@@ -860,7 +1143,10 @@ class SideResult:
     def windows(self): return sum(f.windows for f in self.floors)
 
 
-def price(boxes: list[Box], n_floors: int, base=BASE_PRICE, mult=MULTIPLIER) -> list[FloorLine]:
+def price(boxes: list[Box], n_floors: int, base=BASE_PRICE, mult=MULTIPLIER, selected=None) -> list[FloorLine]:
+    if selected is not None:
+        boxes = [b for b in boxes if b.region in selected]
+        n_floors = max([b.floor for b in boxes if b.counted] or [0])
     lines = []
     for n in range(1, n_floors + 1):
         fb = [b for b in boxes if b.floor == n and b.counted]
@@ -897,8 +1183,9 @@ def draw(img: Image.Image, res: SideResult) -> Image.Image:
     lw = max(2, W // 500)
     f = _font(max(14, W // 60))
     layers = []
+    chosen = set(res.selected) if res.regions else None
     for fl in res.floors:
-        fb = [b for b in res.boxes if b.floor == fl.floor and b.counted]
+        fb = [b for b in res.boxes if b.floor == fl.floor and b.counted and (chosen is None or b.region in chosen)]
         if fb:
             layers.append((fl, fb, FLOOR_COLOURS[(fl.floor - 1) % len(FLOOR_COLOURS)]))
     bands = Image.new("RGBA", out.size, (0, 0, 0, 0))
@@ -913,7 +1200,7 @@ def draw(img: Image.Image, res: SideResult) -> Image.Image:
             pts = [((b.x0 + b.x1) / 2, b.cy) for b in sorted(fb, key=lambda b: b.x0 + b.x1)]
             d.line(pts, fill=col + (230,), width=lw * 2)
     for b in res.boxes:
-        if not b.counted:
+        if not b.counted or (chosen is not None and b.region not in chosen):
             d.rectangle([b.x0, b.y0, b.x1, b.y1], outline=(255, 255, 255, 200), width=lw)
     for fl, fb, col in layers:
         for b in fb:
@@ -944,51 +1231,100 @@ def draw(img: Image.Image, res: SideResult) -> Image.Image:
 
 def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
              base=BASE_PRICE, mult=MULTIPLIER, floors="ai") -> SideResult:
-    raw = detect_sam3(img, thresh) if detector == "sam3" else detect_gemini(img)
+    """Windows -> buildings/walls in the photo -> floors worked out separately for each one.
+
+    The photo can show several buildings, or two walls of one building at a corner. Each becomes a
+    numbered region with its own floors (so two buildings of different heights never mix). The quote
+    covers the region(s) the viewer picks; by default the one with the most windows."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(2) as ex:
+        f_win = ex.submit(lambda: detect_sam3(img, thresh) if detector == "sam3" else detect_gemini(img))
+        f_bld = ex.submit(lambda: segment_buildings(img))
+        raw = f_win.result()
+        try:
+            polys = f_bld.result()
+        except Exception:
+            polys = []  # no building outlines: the whole photo is one region
     boxes = clean(raw)
-    # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time
-    # (the photo is meant to frame the whole side). Kept and drawn, but not counted unless clicked back.
+    # A window sliced by the left or right edge of the photo belongs to the neighbour nearly every time.
+    # Kept and drawn, but not counted unless clicked back.
     W = img.width
     for b in boxes:
         b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
         b.weak = bool(b.conf < WEAK_BELOW)
-    res_note = ""
-    seen = None
-    if floors == "ai":
-        n = None
+    regions = find_regions(img, boxes, polys) if boxes else []
+    res = SideResult(name, boxes)
+    res.regions = regions
+
+    def do(region):
+        bs = region["boxes"]
+        if floors != "ai":
+            return assign_floors_rows([b for b in bs if b.counted] or bs), None, ""
         for provider in ("openai", "gemini"):
             if not os.environ.get("OPENAI_API_KEY" if provider == "openai" else "GEMINI_API_KEY"):
                 continue
             try:
-                n, seen = assign_floors_llm(img, boxes, provider)
-                break
+                n, seen = floors_for_wall(img, bs, provider)
+                return n, seen, ""
             except Exception as e:  # never let one flaky API sink the quote
-                res_note += f"{provider} floors failed ({str(e)[:80]}). "
-        if n is None:
-            res_note += "Used geometric floors."
-            n = assign_floors_rows(boxes)
-    elif floors == "geometric":
-        n = assign_floors_rows(boxes)
-    else:
-        n = assign_floors(boxes)
-    res = SideResult(name, boxes)
-    res.note = res_note
-    if floors == "ai" and n and n >= 3:
-        n2 = _merge_orphan_floors(boxes)
-        n2 = _merge_close_floors(boxes) if n2 >= 3 else n2
-        if n2 != n:
-            n = n2
-            res.floors = price(boxes, n, base, mult)
-    if seen and n and seen < n:
-        n = _merge_to(boxes, seen)
-        res.floors = price(boxes, n, base, mult)
-    if seen and n and seen < n:  # we may have split a storey in two: worth a real check
-        res.floors_check = True
-        res.note = (res.note + " " if res.note else "") + (
-            f"Check the floors: the building reads as {seen} storeys but {n} floors were found. "
-            "If two colours are one storey, use merge on the upper one.")
-    elif seen and n and seen > n:  # may be a hidden floor (behind a balcony or trees), or a basement/roof
-        res.note = (res.note + " " if res.note else "") + (
-            f"The building may have {seen} storeys. If a floor was missed, use + Add a floor.")
-    res.floors = price(boxes, n, base, mult)
+                err = f"{provider} failed ({str(e)[:60]}). "
+        live = [b for b in bs if b.counted]
+        n = assign_floors_rows(live) if live else 0
+        return n, None, "Used geometric floors."
+
+    with ThreadPoolExecutor(max(1, len(regions))) as ex:
+        outs = list(ex.map(do, regions))
+    for r, (n, seen, note) in zip(regions, outs):
+        r["n_floors"] = n
+        r["floors_check"] = bool(seen and n and seen < n)
+        if r["floors_check"]:
+            note += (f" Check the floors: this reads as {seen} storeys but {n} floors were found. "
+                     "If two colours are one storey, use merge on the upper one.")
+        elif seen and n and seen > n:
+            note += f" This may have {seen} storeys. If a floor was missed, use + Add a floor."
+        r["note"] = note.strip()
+    with_windows = [r for r in regions if r["windows"] > 0]
+    res.selected = [max(with_windows, key=lambda r: r["windows"])["id"]] if with_windows else []
+    sel = [r for r in regions if r["id"] in res.selected]
+    res.floors_check = any(r["floors_check"] for r in sel)
+    res.note = " ".join(r["note"] for r in sel if r["note"])
+    res.floors = price(boxes, 0, base, mult, selected=set(res.selected))
     return res
+
+
+def run_area(img: Image.Image, boxes: list[Box], area, base=BASE_PRICE, mult=MULTIPLIER) -> SideResult:
+    """The viewer drew the exact area to count (e.g. one wall of a corner shot). Reuse the windows already
+    found, count only those whose centre is inside the area, and work out floors for just them."""
+    x0, y0, x1, y1 = [float(v) for v in area]
+    x0, x1 = sorted((x0, x1)); y0, y1 = sorted((y0, y1))
+    inside = [b for b in boxes if x0 <= (b.x0 + b.x1) / 2 <= x1 and y0 <= b.cy <= y1]
+    outside = [b for b in boxes if b not in inside]
+    for b in inside:
+        b.region, b.edge, b.other_side = 1, False, False
+    for b in outside:
+        b.region = 2
+    res = SideResult("area", boxes)
+    n, seen, note = 0, None, ""
+    try:
+        n, seen = floors_for_wall(img, inside) if inside else (0, None)
+    except Exception as e:
+        live = [b for b in inside if b.counted]
+        n = assign_floors_rows(live) if live else 0
+        note = "Used geometric floors."
+    rect = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    reg = {"id": 1, "label": "Your area", "polygon": rect, "boxes": inside, "windows": sum(1 for b in inside if b.counted),
+           "n_floors": n, "floors_check": bool(seen and n and seen < n), "note": note}
+    if reg["floors_check"]:
+        reg["note"] += f" Check the floors: this reads as {seen} storeys but {n} floors were found."
+    res.regions = [reg]
+    if outside:
+        res.regions.append({"id": 2, "label": "Outside your area", "polygon": [], "boxes": outside, "windows": 0,
+                            "n_floors": 0, "floors_check": False, "note": ""})
+        for b in outside:
+            b.floor = 1
+    res.selected = [1]
+    res.floors_check = reg["floors_check"]
+    res.note = reg["note"].strip()
+    res.floors = price(boxes, 0, base, mult, selected={1})
+    return res
+

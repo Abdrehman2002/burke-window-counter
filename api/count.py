@@ -14,7 +14,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _core import load_env, run_side  # noqa: E402
+from _core import Box, load_env, run_area, run_side  # noqa: E402
 
 from PIL import Image, ImageOps  # noqa: E402
 
@@ -34,14 +34,24 @@ def process(body: bytes) -> tuple[int, dict]:
     floors = req.get("floors", "ai") if req.get("floors") in ("ai", "geometric") else "ai"
     t = time.time()
     try:
-        res = run_side(img, floors=floors, thresh=thresh)
+        if req.get("area") and req.get("boxes"):  # the viewer drew the area to count: no new detection
+            boxes = [Box(b["x0"], b["y0"], b["x1"], b["y1"], b["conf"], weak=bool(b.get("weak"))) for b in req["boxes"]]
+            res = run_area(img, boxes, req["area"])
+        else:
+            res = run_side(img, floors=floors, thresh=thresh)
     except Exception as e:
         return 502, {"error": f"Window detection failed ({str(e)[:200]})"}
     return 200, {
         "width": img.width, "height": img.height,
-        "boxes": [{"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "conf": b.conf, "floor": int(b.floor), "edge": bool(b.edge), "other_side": bool(b.other_side), "weak": bool(b.weak)}
+        "boxes": [{"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "conf": b.conf, "floor": int(b.floor),
+                   "edge": bool(b.edge), "other_side": bool(b.other_side), "weak": bool(b.weak), "region": int(b.region)}
                   for b in res.boxes],
-        "n_floors": len(res.floors), "note": res.note, "floors_check": bool(res.floors_check), "seconds": round(time.time() - t, 1),
+        "regions": [{"id": r["id"], "label": r["label"], "polygon": r["polygon"], "windows": int(r["windows"]),
+                     "n_floors": int(r.get("n_floors") or 0), "note": r.get("note", ""),
+                     "floors_check": bool(r.get("floors_check"))} for r in res.regions],
+        "selected": list(res.selected),
+        "n_floors": len(res.floors), "note": res.note, "floors_check": bool(res.floors_check),
+        "seconds": round(time.time() - t, 1),
     }
 
 

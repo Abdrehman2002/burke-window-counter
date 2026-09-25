@@ -159,6 +159,19 @@
   .bm-count { border: 1px solid var(--line); background: var(--sunk); border-radius: 8px; padding: 7px; font-size: 13px; }
   .bm-count:hover, .bm-floors button:hover { border-color: var(--accent); }
   .mini { border: 0; background: none; color: var(--accent); padding: 0; font-size: 12px; font-weight: 500; }
+  .pickbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 13px; padding: 10px 12px;
+             border: 1px solid var(--line); border-radius: 12px; background: var(--sunk); }
+  .pickbar.ask { border-color: var(--warn); background: var(--warn-soft); }
+  .pickbar.on { border-color: var(--accent); background: var(--accent-soft); }
+  .pickbar .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pickbar .pickacts { margin-left: auto; display: flex; gap: 6px; }
+  .pickbar .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 11px; font-size: 12.5px; font-weight: 500; }
+  .pickbar .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .pickbar .chip.ghost { color: var(--accent); border-color: var(--accent); }
+  .muted { color: var(--muted); }
+  .areabox { position: absolute; border: 2px dashed #3A7BFF; background: rgba(58,123,255,.15); pointer-events: none; z-index: 4; }
+  .areahint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(8,20,45,.85); color: #fff;
+              padding: 5px 12px; border-radius: 999px; font-size: 12.5px; z-index: 5; pointer-events: none; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; border: 2px solid; }
   .floors { padding: 16px 18px; display: grid; gap: 12px; align-content: start; }
@@ -446,13 +459,31 @@ const skipped = b => !!(b.edge || b.other_side || b.weak);
 const edgeSet = r => new Set(r.boxes.map((b, i) => skipped(b) ? i : -1).filter(i => i >= 0));
 // Everything the viewer can change on one side: which boxes count, which floor each box is on, per-floor
 // +/- adjustments, and how many floors there are.
-const sideState = (res, img) => ({ res, img, removed: edgeSet(res), adjust: {}, fl: res.boxes.map(b => b.floor), nf: res.n_floors });
+const sideState = (res, img, orig) => {
+  const q = { res, img, orig: orig || null, removed: edgeSet(res), adjust: {}, fl: res.boxes.map(b => b.floor),
+              sel: res.regions ? new Set(res.selected || []) : null, touched: false, nf: res.n_floors };
+  q.nf = selFloors(q);
+  return q;
+};
+// Is window i in a building / wall the viewer is quoting?
+const inSel = (q, i) => !q.sel || q.sel.has(q.res.boxes[i].region);
+// How many floors the chosen buildings have (at least 1)
+function selFloors(q) {
+  let m = 0;
+  q.res.boxes.forEach((b, i) => { if (inSel(q, i)) m = Math.max(m, q.fl[i]); });
+  return Math.max(1, m);
+}
+// Regions worth offering: the ones with at least one window we would count
+const pickable = q => (q.res.regions || []).filter(r => r.windows > 0 && r.polygon && r.polygon.length >= 3);
+const needsPick = q => pickable(q).length >= 2 && !q.touched;
+const sideNote = q => (q.res.regions || []).filter(r => !q.sel || q.sel.has(r.id)).map(r => r.note).filter(Boolean).join(" ") || (q.res.regions ? "" : q.res.note || "");
+const sideFloorsCheck = q => q.res.regions ? q.res.regions.some(r => (!q.sel || q.sel.has(r.id)) && r.floors_check) : !!q.res.floors_check;
 
 /* ================= quote maths (all in the browser, so it's instant) ================= */
 function floorsOf(side) {
   const q = S.quote.sides[side], lines = [];
   for (let f = 1; f <= q.nf; f++) {
-    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === f);
+    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === f && inSel(q, i));
     const kept = idx.filter(i => !q.removed.has(i));
     const adj = q.adjust[f] || 0;
     const windows = Math.max(0, kept.length + adj);
@@ -464,12 +495,14 @@ function floorsOf(side) {
 // Has the viewer changed anything on this side?
 function sideEdited(side) {
   const q = S.quote.sides[side], r = q.res;
-  return q.nf !== r.n_floors || Object.values(q.adjust).some(v => v) ||
+  const selChanged = q.sel && (q.sel.size !== (r.selected || []).length || (r.selected || []).some(id => !q.sel.has(id)));
+  return !!q.orig || selChanged || Object.values(q.adjust).some(v => v) ||
          r.boxes.some((b, i) => q.fl[i] !== b.floor || q.removed.has(i) !== skipped(b));
 }
 // Things to check on a side: floors holding an unsure box, plus one if the floor split itself is doubtful
 // and the viewer hasn't touched it yet.
-const sideChecks = s => floorsOf(s).filter(f => f.check).length + (S.quote.sides[s].res.floors_check && !sideEdited(s) ? 1 : 0);
+const sideChecks = s => { const q = S.quote.sides[s];
+  return floorsOf(s).filter(f => f.check).length + (sideFloorsCheck(q) && !sideEdited(s) ? 1 : 0) + (needsPick(q) ? 1 : 0); };
 const sideTotal = s => floorsOf(s).reduce((a, f) => a + f.subtotal, 0);
 const sideWindows = s => floorsOf(s).reduce((a, f) => a + f.windows, 0);
 const quoteTotal = () => Object.keys(S.quote.sides).reduce((a, s) => a + sideTotal(s), 0);
@@ -494,8 +527,19 @@ function draw(canvas, side) {
   const g = canvas.getContext("2d"), W = canvas.width, k = W / r.width;
   const lw = Math.max(2, W / 450), fs = Math.round(Math.max(15, W / 58));
   g.drawImage(img, 0, 0);
+  // Buildings / walls: the ones not being quoted are dimmed, the chosen ones outlined, all numbered.
+  const regs = pickable(q);
+  if (regs.length >= 2 || q.orig) {
+    for (const R of regs) {
+      const on = q.sel && q.sel.has(R.id);
+      g.beginPath(); R.polygon.forEach(([x, y], n) => n ? g.lineTo(x * k, y * k) : g.moveTo(x * k, y * k)); g.closePath();
+      if (!on) { g.fillStyle = "rgba(8,20,45,.5)"; g.fill(); }
+      g.setLineDash(on ? [] : [lw * 4, lw * 3]); g.lineWidth = on ? lw * 2.2 : lw * 1.4;
+      g.strokeStyle = on ? "#3A7BFF" : "rgba(255,255,255,.9)"; g.stroke(); g.setLineDash([]);
+    }
+  }
   const layers = floorsOf(side).map(fl => {
-    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === fl.floor && !q.removed.has(i));
+    const idx = q.fl.map((v, i) => i).filter(i => q.fl[i] === fl.floor && !q.removed.has(i) && inSel(q, i));
     return { fl, idx, bs: idx.map(i => r.boxes[i]), col: colour(fl.floor) };
   }).filter(L => L.idx.length);
   for (const L of layers) if (isLevel(L.bs)) {
@@ -507,8 +551,13 @@ function draw(canvas, side) {
     g.strokeStyle = L.col; g.globalAlpha = 0.85; g.lineWidth = lw * 1.6; g.beginPath();
     pts.forEach(([x, y], n) => n ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke(); g.globalAlpha = 1;
   }
+  r.boxes.forEach((b, i) => {  // windows on buildings not being quoted: faint
+    if (inSel(q, i) || q.removed.has(i)) return;
+    g.strokeStyle = "rgba(255,255,255,.45)"; g.lineWidth = Math.max(1, lw * 0.6);
+    g.strokeRect(b.x0 * k, b.y0 * k, (b.x1 - b.x0) * k, (b.y1 - b.y0) * k);
+  });
   r.boxes.forEach((b, i) => {
-    if (!q.removed.has(i)) return;
+    if (!q.removed.has(i) || !inSel(q, i)) return;
     const x = b.x0 * k, y = b.y0 * k, w = (b.x1 - b.x0) * k, h = (b.y1 - b.y0) * k;
     g.setLineDash([lw * 3, lw * 2]); g.strokeStyle = "rgba(255,255,255,.85)"; g.lineWidth = lw; g.strokeRect(x, y, w, h);
     g.setLineDash([]); g.strokeStyle = "rgba(255,80,80,.95)"; g.beginPath(); g.moveTo(x, y); g.lineTo(x + w, y + h); g.moveTo(x + w, y); g.lineTo(x, y + h); g.stroke();
@@ -528,6 +577,19 @@ function draw(canvas, side) {
     g.fillStyle = L.col; g.fillRect(lx, ty, tw + 10, fs + 12);
     g.fillStyle = "#fff"; g.fillText(label, lx + 5, ty + 6);
   }
+  if (regs.length >= 2) {  // number badges last, so nothing covers them
+    const bf = Math.round(fs * 1.25);
+    g.font = `700 ${bf}px Poppins, "Segoe UI", sans-serif`;
+    for (const R of regs) {
+      const on = q.sel && q.sel.has(R.id);
+      const xs = R.polygon.map(p => p[0]), ys = R.polygon.map(p => p[1]);
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2 * k, ty = Math.max(4, Math.min(...ys) * k + 6);
+      const label = ` ${on ? "✓ " : ""}${R.id} · ${R.windows} windows `, tw = g.measureText(label).width;
+      const bx = Math.min(Math.max(4, cx - tw / 2), W - tw - 14);
+      g.fillStyle = on ? "#154BFF" : "rgba(8,20,45,.85)"; g.fillRect(bx, ty, tw + 10, bf + 14);
+      g.fillStyle = "#fff"; g.fillText(label, bx + 5, ty + 7);
+    }
+  }
 }
 
 // Click a box on the photo: a small menu to move that window to another floor, or stop counting it.
@@ -537,10 +599,15 @@ function onCanvasClick(e, side) {
   const x = (e.clientX - rect.left) / rect.width * r.width, y = (e.clientY - rect.top) / rect.height * r.height;
   let best = -1, area = Infinity;
   r.boxes.forEach((b, i) => {
+    if (!inSel(q, i)) return;
     if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) { const a = (b.x1 - b.x0) * (b.y1 - b.y0); if (a < area) { area = a; best = i; } }
   });
   closeMenu();
-  if (best < 0) return;
+  if (best < 0) {  // not on a counted window: did they tap a building?
+    const hit = pickable(q).filter(R => inPoly(x, y, R.polygon)).sort((a, b) => polyArea(a.polygon) - polyArea(b.polygon))[0];
+    if (hit && pickable(q).length >= 2) toggleRegion(side, hit.id);
+    return;
+  }
   const counted = !q.removed.has(best), cur = q.fl[best];
   const m = document.createElement("div");
   m.className = "boxmenu"; m.id = "boxmenu"; m.setAttribute("role", "dialog"); m.setAttribute("aria-label", "Change this window");
@@ -569,6 +636,59 @@ function onCanvasClick(e, side) {
   m.querySelector("button").focus();
 }
 function closeMenu() { $("boxmenu")?.remove(); }
+function inPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi) inside = !inside;
+  }
+  return inside;
+}
+const polyArea = p => Math.abs(p.reduce((a, [x, y], i) => { const [x2, y2] = p[(i + 1) % p.length]; return a + x * y2 - x2 * y; }, 0)) / 2;
+function toggleRegion(side, id) {
+  const q = S.quote.sides[side];
+  q.sel.has(id) ? q.sel.delete(id) : q.sel.add(id);
+  q.touched = true; q.nf = selFloors(q);
+  const R = q.res.regions.find(r => r.id === id);
+  renderWork(); toast(`${q.sel.has(id) ? "Counting" : "Not counting"} ${R ? R.label : "that building"}`);
+}
+
+// Draw the exact area to count: drag a rectangle; floors are re-worked for just the windows inside it.
+function startDrawArea(side) {
+  const cv = $("cv"), wrap = cv.parentElement, q = S.quote.sides[side];
+  closeMenu();
+  const box = document.createElement("div"); box.className = "areabox"; box.hidden = true; wrap.appendChild(box);
+  const hint = document.createElement("div"); hint.className = "areahint"; hint.textContent = "Drag over the wall you want to count"; wrap.appendChild(hint);
+  cv.style.cursor = "crosshair"; cv.style.touchAction = "none";
+  let start = null;
+  const pos = e => { const r = cv.getBoundingClientRect(); return [Math.min(Math.max(e.clientX - r.left, 0), r.width), Math.min(Math.max(e.clientY - r.top, 0), r.height)]; };
+  const down = e => { start = pos(e); cv.setPointerCapture(e.pointerId); box.hidden = false; e.preventDefault(); };
+  const move = e => { if (!start) return; const [x, y] = pos(e);
+    Object.assign(box.style, { left: Math.min(x, start[0]) + "px", top: Math.min(y, start[1]) + "px", width: Math.abs(x - start[0]) + "px", height: Math.abs(y - start[1]) + "px" }); };
+  const up = async e => {
+    if (!start) return;
+    const [x, y] = pos(e), r = cv.getBoundingClientRect(), sx = q.res.width / r.width, sy = q.res.height / r.height;
+    const area = [Math.min(x, start[0]) * sx, Math.min(y, start[1]) * sy, Math.max(x, start[0]) * sx, Math.max(y, start[1]) * sy];
+    cleanup();
+    if (area[2] - area[0] < 20 || area[3] - area[1] < 20) { toast("That area was too small. Try again."); return; }
+    hint.textContent = "Counting that area…"; wrap.appendChild(hint);
+    try {
+      const c = document.createElement("canvas"); c.width = q.img.naturalWidth; c.height = q.img.naturalHeight;
+      c.getContext("2d").drawImage(q.img, 0, 0);
+      const resp = await fetch("api/count", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: c.toDataURL("image/jpeg", 0.9), area, boxes: q.res.boxes }) });
+      const j = await resp.json();
+      if (!resp.ok || j.error) throw new Error(j.error || resp.status);
+      S.quote.sides[side] = sideState(j, q.img, q.orig || q.res);
+      toast("Counting only the area you drew");
+    } catch (err) { toast("Couldn't count that area. Try again."); }
+    hint.remove(); renderWork();
+  };
+  function cleanup() { cv.removeEventListener("pointerdown", down); cv.removeEventListener("pointermove", move); cv.removeEventListener("pointerup", up);
+    box.remove(); hint.remove(); cv.style.cursor = ""; cv.style.touchAction = ""; S.drawing = null; }
+  S.drawing = cleanup;
+  cv.addEventListener("pointerdown", down); cv.addEventListener("pointermove", move); cv.addEventListener("pointerup", up);
+}
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
 document.addEventListener("click", e => { if (!e.target.closest("#boxmenu") && e.target.id !== "cv") closeMenu(); });
 
@@ -638,12 +758,13 @@ function renderSide(side) {
   $("tabbody").innerHTML = `
     <div class="sidegrid">
       <div class="viewer">
+        ${pickBar(side)}
         <div class="canvaswrap"><canvas id="cv" role="img" aria-label="${side} photo with each window boxed and coloured by floor"></canvas></div>
         <div class="legend">
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
           <span><i style="border-color:#FFAA00"></i>Unsure, check it</span>
           <span><i style="border-color:#FF5050;border-style:dashed"></i>Not counted (another side, next door, too unsure, or removed)</span>
-          <span>Click any window to move it to another floor or stop counting it.</span>
+          <span>Click a window to move it to another floor or stop counting it. Click a building to count it or not.</span>
         </div>
       </div>
       <div class="floors">
@@ -663,12 +784,15 @@ function renderSide(side) {
           <button class="linkbtn" id="addbelow" type="button" title="The ground floor was missed: everything moves up one floor">+ Add a floor below</button>
         </div>
         <div class="fsum"><span>${sideWindows(side)} windows</span><b class="num">${money(sideTotal(side))}</b></div>
-        ${q.res.floors_check && !sideEdited(side) ? `<div class="hint warn">${esc(q.res.note)}</div>` : (q.res.note && !q.res.floors_check ? `<div class="hint">${esc(q.res.note)}</div>` : "")}
+        ${sideNote(q) ? `<div class="hint ${sideFloorsCheck(q) && !sideEdited(side) ? "warn" : ""}">${esc(sideNote(q))}</div>` : ""}
         ${checks ? `<div class="hint warn">${checks} floor${checks > 1 ? "s have" : " has"} a window the detector wasn't sure about (amber). Look at those before sending.</div>` : ""}
         ${sideEdited(side) ? `<button class="linkbtn" id="undo" type="button">Undo my changes on this side</button>` : ""}
       </div>
     </div>`;
-  const cv = $("cv"); draw(cv, side); cv.addEventListener("click", e => onCanvasClick(e, side));
+  const cv = $("cv"); draw(cv, side); cv.addEventListener("click", e => { if (!S.drawing) onCanvasClick(e, side); });
+  $("tabbody").querySelectorAll("[data-region]").forEach(b => b.addEventListener("click", () => toggleRegion(side, +b.dataset.region)));
+  $("drawarea")?.addEventListener("click", () => startDrawArea(side));
+  $("backregions")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.orig, q.img); renderWork(); toast("Back to the buildings found in the photo"); });
   $("tabbody").querySelectorAll(".step button").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.f, d = +b.dataset.d, line = floorsOf(side).find(l => l.floor === f);
     if (d < 0 && line.windows === 0) return;
@@ -686,7 +810,21 @@ function renderSide(side) {
   $("tabbody").querySelectorAll("[data-merge]").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.merge; mergeDown(side, f); renderWork(); toast(`Floor ${f} merged into floor ${f - 1}`);
   }));
-  $("undo")?.addEventListener("click", () => { Object.assign(q, sideState(q.res, q.img)); renderWork(); toast("Back to the detected counts"); });
+  $("undo")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.orig || q.res, q.img); renderWork(); toast("Back to the detected counts"); });
+}
+
+// Above the photo: which buildings / walls this side's quote covers, and the draw-your-own-area tool.
+function pickBar(side) {
+  const q = S.quote.sides[side], regs = pickable(q);
+  if (q.orig) return `<div class="pickbar on"><span><b>Counting the area you drew.</b></span>
+      <span class="pickacts"><button class="chip" id="drawarea" type="button">Draw again</button>
+      <button class="chip" id="backregions" type="button">Back to buildings</button></span></div>`;
+  const chips = regs.length >= 2 ? regs.map(R => `<button class="chip ${q.sel.has(R.id) ? "on" : ""}" type="button" data-region="${R.id}"
+      aria-pressed="${q.sel.has(R.id)}">${q.sel.has(R.id) ? "✓ " : ""}${R.id} · ${esc(R.label)} · ${R.windows}</button>`).join("") : "";
+  const ask = regs.length >= 2 ? (q.touched ? "<b>Counting:</b>" : `<b>This photo shows ${regs.length} buildings or walls.</b> Tap the ones you're quoting, on the photo or here:`) : "";
+  return `<div class="pickbar ${needsPick(q) ? "ask" : ""}">
+      ${ask ? `<span>${ask}</span><span class="chips">${chips}</span>` : `<span class="muted">Counting the whole building.</span>`}
+      <span class="pickacts"><button class="chip ghost" id="drawarea" type="button" title="Drag a box over exactly the wall to count">Draw the area to count</button></span></div>`;
 }
 
 function summaryRows() {
