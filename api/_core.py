@@ -1258,112 +1258,288 @@ def assign_floors_rows(boxes: list[Box]) -> int:
 # ---------- glass curtain walls ----------
 GLASS_WALLS = os.environ.get("GLASS_WALLS", "1") == "1"
 GLASS_MIN_AREA = 0.02  # glass outlines smaller than this share of the photo are ordinary windows
+GLASS_WALL_PROMPTS = ("glass curtain wall", "glass facade")
 
 
 def segment_glass(img: Image.Image) -> list:
-    """SAM 3 "glass curtain wall" outlines (a separate request, so it can't change the window results)."""
+    """SAM 3 glass-wall outlines (a separate request, so it can't change the window results). Two wordings in
+    one call: "glass curtain wall" alone found nothing on a plain blue grid facade that "glass facade" outlines
+    at 59% of the photo. Outlines mostly covering a larger one are the same wall and are dropped."""
     data = _roboflow_post({"image": {"type": "base64", "value": _jpeg_b64(img)},
-                           "prompts": [{"type": "text", "text": "glass curtain wall"}],
+                           "prompts": [{"type": "text", "text": t} for t in GLASS_WALL_PROMPTS],
                            "output_prob_thresh": 0.4, "format": "polygon"})
     polys = []
-    for p in data["prompt_results"][0]["predictions"]:
-        rings = [m for m in p["masks"] if len(m) >= 3]
-        if rings:
-            ring = max(rings, key=_poly_area)
-            if _poly_area(ring) > GLASS_MIN_AREA * img.width * img.height:
-                polys.append(ring)
-    return polys
+    for res in data["prompt_results"]:
+        for p in res["predictions"]:
+            rings = [m for m in p["masks"] if len(m) >= 3]
+            if rings:
+                ring = max(rings, key=_poly_area)
+                if _poly_area(ring) > GLASS_MIN_AREA * img.width * img.height:
+                    polys.append(ring)
+    masks = [_raster(p, img.size) for p in polys]
+    keep = []
+    for i in sorted(range(len(polys)), key=lambda i: -masks[i].sum()):
+        if all((masks[i] & masks[j]).sum() < 0.5 * masks[i].sum() for j in keep):
+            keep.append(i)
+    return [polys[i] for i in keep]
 
 
-def _peaks(profile, min_dist, k=1.0):
-    p = np.convolve(profile, np.ones(5) / 5, mode="same")
-    if p.max() <= 0:
-        return []
-    thr = p.mean() + k * p.std()
-    idx = [i for i in range(1, len(p) - 1) if p[i] >= p[i - 1] and p[i] >= p[i + 1] and p[i] > thr]
-    idx.sort(key=lambda i: -p[i])
-    out = []
-    for i in idx:
-        if all(abs(i - j) >= min_dist for j in out):
-            out.append(i)
-    return sorted(out)
+# The pane grid is measured on synthetic curtain walls with known grids (random camera angle, reflections,
+# lamp posts, trees, dark/light/spandrel/alternating frames): mean pane error 4% vs 27.5% for the previous
+# darkness-profile method, exact columns on 50/60 walls and exact rows on 54/60. See AUDIT.md.
+GRID_MIN_GAP = 0.012   # two frame bars closer than this share of the wall's size are one bar (its two edges)
+GRID_COVER = 0.6       # a bar must run at least this much of the length a typical bar runs (drops lamp posts)
+GRID_FILL = 0.25       # fill a missing bar only where the photo shows at least this share of a bar's strength
+GRID_HINT_X = 2.0      # more bars than this multiple of the model's count: the extras are blinds or reflections
+GRID_HINT_KEEP = 1.2   # ...then keep the strongest bars, up to this multiple of the model's count
 
 
-def glass_grid(img, poly, kv=0.8, kh=1.0):
-    """Panes of a glass curtain wall, from its frame grid. Frame bars are darker than the glass around
-    them, so inside the glass outline, darkness against a blurred background peaks on every bar:
-    vertical bars from the column profile, then horizontal bars strip by strip between them (so rows
-    that slope in perspective are still found). Returns (x0, y0, x1, y1, gy) per pane, where gy is the
-    pane's height up the wall from 0 (bottom) to 1 (top)."""
+def _smooth(h, s):
+    r = int(3 * s) + 1
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / s) ** 2)
+    return np.convolve(h, k / k.sum(), mode="same")
+
+
+def _pencil(px, py, w, lim0, lim1, nbins):
+    """The pencil of lines  y = a + (s0 + s1*a) x  (all lines through one vanishing point) that best explains
+    the weighted edge points: the one whose histogram over the intercept a is sharpest. Returns (s0, s1)."""
+    def score(s0, s1):
+        den = 1 + s1 * px
+        ok = den > 0.2
+        h, _ = np.histogram((py[ok] - s0 * px[ok]) / den[ok], bins=nbins, range=(-1, 1), weights=w[ok])
+        h = _smooth(h, 1.2)
+        t = h.sum()
+        return float((h ** 2).sum() / (t * t)) if t > 0 else 0.0
+    best = (-1.0, 0.0, 0.0)
+    for s0 in np.linspace(-lim0, lim0, 33):
+        for s1 in np.linspace(-lim1, lim1, 17):
+            sc = score(s0, s1)
+            if sc > best[0]:
+                best = (sc, s0, s1)
+    d0, d1 = lim0 / 16, lim1 / 8
+    for _ in range(3):
+        _, b0, b1 = best
+        for s0 in np.linspace(b0 - d0, b0 + d0, 7):
+            for s1 in np.linspace(b1 - d1, b1 + d1, 7):
+                sc = score(s0, s1)
+                if sc > best[0]:
+                    best = (sc, s0, s1)
+        d0, d1 = d0 / 3, d1 / 3
+    return best[1], best[2]
+
+
+def _split(v):
+    """Strength threshold between frame bars and background texture: Otsu on log strength, never below 15%
+    of the strongest bars."""
+    if len(v) < 3:
+        return 0.0
+    o = np.sort(np.log(np.maximum(v, 1e-12)))
+    best, t = -1.0, o[0]
+    for k in range(1, len(o)):
+        a, b = o[:k], o[k:]
+        sc = len(a) * len(b) * (a.mean() - b.mean()) ** 2
+        if sc > best:
+            best, t = sc, (o[k - 1] + o[k]) / 2
+    return float(max(np.exp(t), 0.15 * np.median(np.sort(v)[::-1][:5])))
+
+
+def _bars(h, lo, hi, gap, hint=None):
+    """Bar positions (bins) from a vote histogram whose spacing is uniform (perspective removed). lo/hi are
+    the wall's own edges and always count. Missing bars are filled where the spacing and the photo agree."""
+    cand = [i for i in range(1, len(h) - 1) if h[i] >= h[i - 1] and h[i] >= h[i + 1] and h[i] > 0 and lo - 2 < i < hi + 2]
+    if not cand:
+        return [lo, hi]
+    merged = []
+    for i in sorted(cand, key=lambda i: -h[i]):  # a bar's two edges are one bar
+        if all(abs(i - j) >= gap for j in merged):
+            merged.append(i)
+    thr = _split(np.array([h[i] for i in merged]))
+    inside = [i for i in merged if lo + gap * 0.6 < i < hi - gap * 0.6]
+    if hint and sum(1 for i in inside if h[i] >= thr) + 1 > GRID_HINT_X * hint + 1:
+        return sorted(set(inside[:max(0, int(round(GRID_HINT_KEEP * hint)) - 1)] + [lo, hi]))
+    L = sorted(set([i for i in inside if h[i] >= thr] + [lo, hi]))
+    for _ in range(3):
+        if len(L) < 4:
+            break
+        g = np.diff(L)
+        new = [L[0]]
+        for k in range(1, len(L)):
+            nb = np.concatenate([g[max(0, k - 4):k - 1], g[k:k + 3]])
+            med = float(np.median(nb)) if len(nb) else float(g[k - 1])
+            span = L[k] - new[-1]
+            if span < 0.5 * med and 0 < k < len(L) - 1:
+                continue  # far closer than its neighbours: not a bar
+            m = int(round(span / med)) if med > 0 else 1
+            if m >= 2 and span / med > 1.6:
+                start = new[-1]
+                for j in range(1, m):
+                    p = start + span * j / m
+                    w = max(2, int(0.15 * span / m))
+                    seg = h[max(0, int(p) - w):int(p) + w + 1]
+                    # fill only where the photo shows at least a faint bar: spacing alone would split a
+                    # tall vision pane that sits between short spandrel rows
+                    if len(seg) and seg.max() >= GRID_FILL * thr:
+                        new.append(p)
+            new.append(L[k])
+        L = sorted(set(int(round(v)) for v in new))
+    return L
+
+
+def glass_grid(img, poly, cols_hint=None, rows_hint=None):
+    """Panes of a glass curtain wall, from its frame grid. Returns (x0, y0, x1, y1, gy) per pane, where gy
+    is the pane's height up the wall from 0 (bottom) to 1 (top).
+
+    Frame bars are straight lines, and in a photo the horizontal ones all meet at one vanishing point and
+    the vertical ones at another. So each family is found as the pencil of lines through one point that best
+    explains the photo's edges, over the whole wall at once. Along each family the coordinate 1/(p - V) makes
+    evenly spaced bars evenly spaced again (V = the other family's vanishing point), which lets a missing
+    bar at the far, foreshortened end be filled. cols_hint/rows_hint are the model's rough counts: when the
+    photo shows far more bars than that, the extras are blinds or reflections and only the strongest stay."""
     from PIL import ImageFilter
     P = np.array(poly, dtype=float)
     x0, y0, x1, y1 = [int(v) for v in (P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max())]
-    if x1 - x0 < 10 or y1 - y0 < 10:
+    W, H = x1 - x0, y1 - y0
+    if W < 20 or H < 20:
         return []
-    crop = img.crop((x0, y0, x1, y1)).convert("L")
-    g = np.asarray(crop, dtype=float)
-    H, W = g.shape
+    g = np.asarray(img.crop((x0, y0, x1, y1)).convert("L").filter(ImageFilter.GaussianBlur(1)), dtype=float)
     m = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(m).polygon([(x - x0, y - y0) for x, y in poly], fill=1)
-    mask = np.asarray(m, dtype=bool)
-    bg = np.asarray(crop.filter(ImageFilter.BoxBlur(max(3, W // 40))), dtype=float)
-    dark = np.clip(bg - g, 0, None) * mask
-    V = dark.sum(0) / np.maximum(mask.sum(0), 1)
-    V[mask.sum(0) < 0.3 * H] = 0
-    vx = _peaks(V, max(6, int(0.02 * W)), k=kv)
-    cols = np.where(mask.any(0))[0]
-    if not len(cols):
+    ImageDraw.Draw(m).polygon([(x - x0, y - y0) for x, y in poly], fill=255)
+    er = max(2, int(0.006 * max(W, H)))
+    edge_free = np.asarray(m.filter(ImageFilter.MinFilter(2 * er + 1)), dtype=bool)  # not the outline itself
+    full = np.asarray(m, dtype=bool)
+    gy_, gx_ = np.gradient(g)
+    S = float(max(W, H))
+    ys, xs = np.nonzero(edge_free)
+    if len(xs) < 100:
         return []
-    left, right = cols[0], cols[-1]
-    bounds = sorted(set([left] + [x for x in vx if left + 4 < x < right - 4] + [right]))
+    ax, ay = np.abs(gx_[ys, xs]), np.abs(gy_[ys, xs])
+    px, py = (xs - W / 2) / S, (ys - H / 2) / S
+    rng = np.random.default_rng(0)
+
+    def pick(sel, wgt, cap=25000):
+        idx = np.nonzero(sel)[0]
+        if len(idx) > cap:
+            idx = rng.choice(idx, cap, replace=False, p=wgt[idx] / wgt[idx].sum())
+            return idx, np.ones(len(idx))
+        return idx, wgt[idx]
+    thr = np.percentile(np.hypot(ax, ay), 60)
+    ih, wh = pick((ay > 1.5 * ax) & (ay > thr), ay)  # horizontal bars: brightness changes up-down
+    iv, wv = pick((ax > 1.5 * ay) & (ax > thr), ax)
+    if len(ih) < 50 or len(iv) < 50:
+        return []
+    # a vanishing point cannot sit inside the wall: keep it at least 0.6 of the wall's width (height) away
+    s0, s1 = _pencil(px[ih], py[ih], wh, 0.9, min(2.5, 1 / (0.6 * W / S)), int(2 * S))
+    t0, t1 = _pencil(py[iv], px[iv], wv, 0.5, min(2.5, 1 / (0.6 * H / S)), int(2 * S))
+    fy, fx = np.nonzero(full)
+    fxn, fyn = (fx - W / 2) / S, (fy - H / 2) / S
+    a_lo, a_hi = np.percentile((fyn - s0 * fxn) / (1 + s1 * fxn), [0.5, 99.5])
+    c_lo, c_hi = np.percentile((fxn - t0 * fyn) / (1 + t1 * fyn), [0.5, 99.5])
+
+    def meet(a, c):  # the horizontal bar with intercept a meets the vertical bar with intercept c
+        b, d = s0 + s1 * a, t0 + t1 * c
+        xn = (c + d * a) / (1 - d * b)
+        return xn, a + b * xn
+    a_ref, c_ref = (a_lo + a_hi) / 2, (c_lo + c_hi) / 2
+    grid_a = np.linspace(a_lo - 0.05, a_hi + 0.05, 4000)
+    grid_c = np.linspace(c_lo - 0.05, c_hi + 0.05, 4000)
+    wa = meet(grid_a, c_ref)[1]
+    wc = meet(a_ref, grid_c)[0]
+    if abs(t1) > 0.05:
+        wa = -1 / (wa - (-1 / t1))
+    if abs(s1) > 0.05:
+        wc = -1 / (wc - (-1 / s1))
+    if not (np.all(np.diff(wa) > 0) and np.all(np.diff(wc) > 0)):
+        wa, wc = grid_a, grid_c
+    vote_a = np.interp((py[ih] - s0 * px[ih]) / (1 + s1 * px[ih]), grid_a, wa)
+    vote_c = np.interp((px[iv] - t0 * py[iv]) / (1 + t1 * py[iv]), grid_c, wc)
+
+    def bars(vals, wts, lo, hi, span_n, along, hint):
+        span = hi - lo
+        r0, r1 = lo - 0.05 * span, hi + 0.05 * span
+        nb = max(50, int(2 * span_n * S * 1.1))  # about half a pixel per bin
+        h, _ = np.histogram(vals, bins=nb, range=(r0, r1), weights=wts)
+        h = _smooth(h, 1.2)
+        tb = lambda v: int(round((v - r0) / (r1 - r0) * nb))
+        # a real frame bar runs the length of the wall; a lamp post or a tree edge covers only part of it
+        bi = np.clip(((vals - r0) / (r1 - r0) * nb).astype(int), 0, nb - 1)
+        q0, q1 = np.percentile(along, [2, 98])
+        seg = np.clip(((along - q0) / max(1e-9, q1 - q0) * 12).astype(int), 0, 11)
+        half = max(1, int(GRID_MIN_GAP * S) // 2)
+        order = np.argsort(bi)
+        sb = bi[order]
+        peaks = sorted([i for i in range(1, nb - 1) if h[i] >= h[i - 1] and h[i] >= h[i + 1] and h[i] > 0],
+                       key=lambda i: -h[i])[:300]
+        cov = {i: len(set(seg[order[np.searchsorted(sb, i - half):np.searchsorted(sb, i + half + 1)]].tolist())) / 12
+               for i in peaks}
+        if cov:
+            ref = np.median(sorted(cov.values(), reverse=True)[:max(3, len(cov) // 10)])
+            for i, cv in cov.items():
+                if cv < GRID_COVER * ref:
+                    h[max(0, i - half):i + half + 1] = 0
+        span_px = span_n * S
+        gap = max(4, int(max(GRID_MIN_GAP * S, 10) * nb / (1.1 * span_px)))
+        return [r0 + b / nb * (r1 - r0) for b in _bars(h, tb(lo), tb(hi), gap, hint)]
+    wa_lo, wa_hi = np.interp([a_lo, a_hi], grid_a, wa)
+    wc_lo, wc_hi = np.interp([c_lo, c_hi], grid_c, wc)
+    A = np.interp(bars(vote_a, wh, wa_lo, wa_hi, a_hi - a_lo, px[ih], rows_hint), wa, grid_a)
+    C = np.interp(bars(vote_c, wv, wc_lo, wc_hi, c_hi - c_lo, py[iv], cols_hint), wc, grid_c)
     panes = []
-    for a, b in zip(bounds, bounds[1:]):
-        if b - a < 5:
-            continue
-        sl = slice(a, b)
-        cm = mask[:, sl]
-        Hp = dark[:, sl].sum(1) / np.maximum(cm.sum(1), 1)
-        Hp[cm.sum(1) < 0.5 * (b - a)] = 0
-        ys = np.where(cm.any(1))[0]
-        if not len(ys):
-            continue
-        top, bot = ys[0], ys[-1]
-        hy = _peaks(Hp, max(6, int(0.04 * H)), k=kh)
-        yb = sorted(set([top] + [y for y in hy if top + 4 < y < bot - 4] + [bot]))
-        for t, u in zip(yb, yb[1:]):
-            if u - t >= 5 and cm[t:u].mean() >= 0.5:
-                gy = 1 - ((t + u) / 2 - top) / max(1, bot - top)
-                panes.append((x0 + a, y0 + t, x0 + b, y0 + u, float(min(1, max(0, gy)))))
+    for j in range(len(A) - 1):
+        for i in range(len(C) - 1):
+            pts = [meet(a, c) for a in (A[j], A[j + 1]) for c in (C[i], C[i + 1])]
+            xs_ = [p[0] * S + W / 2 for p in pts]
+            ys_ = [p[1] * S + H / 2 for p in pts]
+            cx, cy = int(sum(xs_) / 4), int(sum(ys_) / 4)
+            if not (0 <= cy < H and 0 <= cx < W and full[cy, cx]):
+                continue
+            gyv = (a_hi - (A[j] + A[j + 1]) / 2) / max(1e-6, a_hi - a_lo)
+            panes.append((x0 + min(xs_), y0 + min(ys_), x0 + max(xs_), y0 + max(ys_), float(min(1, max(0, gyv)))))
     return panes
 
 
-GLASS_STOREYS_PROMPT = (
-    "This photo shows a building with a glass curtain wall (outlined in cyan). How many storeys (floor "
-    "levels) of the building does that glass wall span, from its bottom edge to its top edge? Count floor "
-    "levels of the building, NOT rows of glass panes: one storey usually has 2 to 4 rows of panes, and a "
-    "tall lobby can be one storey. Look for floor slabs, ceilings or spandrel bands seen through the glass, "
-    "doors (a door is on storey 1), and the height of people, benches or trees for scale. "
-    'Return JSON only: {"storeys": 2}')
+GLASS_SURVEY_PROMPT = (
+    "This photo shows a building with an area outlined in cyan. (0) glass_wall: is the outlined area a glass "
+    "curtain wall or storefront glazing, meaning glass from edge to edge held in a metal frame (true), or a wall "
+    "of separate windows set in brick, stone, concrete or siding (false)? Then, about the outlined glass only: "
+    "(1) columns: how many vertical strips of glass across it, between its vertical frame "
+    "bars. (2) rows: how many horizontal bands of glass from its bottom edge to its top edge, between its "
+    "horizontal frame bars. Only the frame counts: ignore blinds, reflections and anything seen through the "
+    "glass. (3) storeys: how many floor levels of the building it spans. Count floor levels, NOT rows of glass "
+    "panes: one storey usually has 2 to 4 rows of panes, and a tall lobby can be one storey. Look for floor "
+    "slabs, ceilings or spandrel bands seen through the glass, doors (a door is on storey 1), and the height "
+    "of people, benches or trees for scale. "
+    'Return JSON only: {"glass_wall": true, "columns": 12, "rows": 5, "storeys": 2}')
 
 
-def glass_storeys(img: Image.Image, poly) -> int | None:
-    """The model's estimate (median of 3) of how many storeys a glass wall spans. None if unavailable."""
+def glass_survey(img: Image.Image, poly) -> dict:
+    """The model's rough read of a glass-wall outline (median of 3): whether it really is a glass wall, its
+    storeys, and pane columns and rows. The storeys
+    price the panes; the pane counts only steer the frame-grid measurement away from blinds and reflections
+    (they undercount big grids, so they never set the pane count themselves). {} if unavailable."""
     if not os.environ.get("OPENAI_API_KEY") or remaining() < 15:
-        return None
+        return {}
     pic = img.copy()
     ImageDraw.Draw(pic).polygon([tuple(p) for p in poly], outline=(0, 255, 255), width=max(3, img.width // 300))
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(VOTES) as ex:
-        futs = [ex.submit(_openai_json, pic, GLASS_STOREYS_PROMPT) for _ in range(VOTES)]
-    vals = []
+        futs = [ex.submit(_openai_json, pic, GLASS_SURVEY_PROMPT) for _ in range(VOTES)]
+    got = {"storeys": [], "columns": [], "rows": []}
+    glass_votes = []
     for f in futs:
         try:
-            v = _as_int(json.loads(f.result()).get("storeys"))
-            if 1 <= v <= 60:
-                vals.append(v)
+            d = json.loads(f.result())
+            if isinstance(d.get("glass_wall"), bool):
+                glass_votes.append(d["glass_wall"])
+            for k in got:
+                v = _as_int(d.get(k))
+                if 1 <= v <= 200:
+                    got[k].append(v)
         except Exception:
             pass
-    return int(round(float(np.median(vals)))) if vals else None
+    out = {k: int(round(float(np.median(v)))) for k, v in got.items() if v}
+    if glass_votes:
+        out["glass_wall"] = sum(glass_votes) * 2 > len(glass_votes)  # majority; a tie keeps it as ordinary windows
+    return out
 
 
 def storey_of(gy: float, n: int) -> int:
@@ -1401,6 +1577,18 @@ def apply_glass_walls(img: Image.Image, boxes: list[Box], glass_polys, building_
     glass_polys = walls
     if not glass_polys:
         return boxes, 0
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max(1, len(glass_polys))) as ex:
+        surveys = list(ex.map(lambda p: glass_survey(img, p), glass_polys))
+    # "glass facade" also outlines ordinary facades of windows set in brick or concrete (a hotel tower read as
+    # one glass wall came to $176,742). The model says which it is; a wall of separate windows keeps its
+    # ordinary window count.
+    keep = [i for i, sv in enumerate(surveys) if sv.get("glass_wall", True)]
+    glass_polys = [glass_polys[i] for i in keep]
+    surveys = [surveys[i] for i in keep]
+    if not glass_polys:
+        apply_glass_walls.polys, apply_glass_walls.storeys = [], []
+        return boxes, 0
     masks = [_raster(p, img.size) for p in glass_polys]
 
     def inside(b):
@@ -1408,12 +1596,11 @@ def apply_glass_walls(img: Image.Image, boxes: list[Box], glass_polys, building_
         return any(0 <= y < m.shape[0] and 0 <= x < m.shape[1] and m[y, x] for m in masks)
     kept = [b for b in boxes if not inside(b)]
     panels = []
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max(1, len(glass_polys))) as ex:
-        storeys = list(ex.map(lambda p: glass_storeys(img, p), glass_polys))
+    storeys = [sv.get("storeys") for sv in surveys]
     for gi, p in enumerate(glass_polys):
         n = storeys[gi] or 1
-        for x0, y0, x1, y1, gy in glass_grid(img, p):
+        sv = surveys[gi]
+        for x0, y0, x1, y1, gy in glass_grid(img, p, sv.get("columns"), sv.get("rows")):
             panels.append(Box(float(x0), float(y0), float(x1), float(y1), CHECK_BELOW - 0.01,
                               floor=storey_of(gy, n), group=gi, kind="panel", gy=gy))
     apply_glass_walls.polys = glass_polys

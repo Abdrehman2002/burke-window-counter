@@ -110,6 +110,41 @@ Hallidie picks its glass facade; the medical office picks its glass wall and bri
 **Still open:** C1 shop-front glass (low detector confidence; needs Burke's pricing rule). Glass-wall panel *rows* are not always storeys (glass can have 2 rows per floor), so
 glass walls are always flagged for a check.
 
+## Glass curtain walls, v2 (2026-09-27)
+
+Counting 300 panes by eye gives a wrong answer key, so the pane grid is now scored on **synthetic curtain
+walls with an exact grid** (`glass_bench.py`, no network): random column/row counts and pane sizes, random
+camera angle, reflections, dark/light/spandrel/alternating frames, lamp posts and trees in 40%.
+
+| | Mean pane-count error (60 walls) |
+|---|---|
+| v1: darkness profile, strip by strip | **27.5%** |
+| v2: vanishing-point line search | **4.3%** (exact columns 50/60, exact rows 54/60) |
+
+How v2 works (`glass_grid`): frame bars are straight lines through a vanishing point, so each family is
+the pencil of lines through one point that best explains the edges, found over the whole wall at once.
+Along each family, `1/(p - V)` makes evenly spaced bars evenly spaced again, so a missing bar at the
+squeezed far end can be filled. Filled only where the photo shows at least a faint bar (spacing alone split
+tall vision panes between short spandrel rows). Bars must run most of the wall's length (drops lamp posts).
+
+What was tried and dropped, measured: a smaller minimum bar gap (error 9.8% → 20.4%); a cap of 40 panes
+across (7.2% vs 4.2%); per-column extra transoms for staggered grids (exact rows 54 → 36–45 of 60).
+
+Real photos, which the synthetic walls can't fully stand in for:
+
+| Problem | Fix | Result |
+|---|---|---|
+| g15 (a plain blue grid tower) not found at all | SAM prompt "glass facade" alongside "glass curtain wall", same call, overlapping outlines deduped | 0 → **25 × 17 = 400 panes** (checked by eye); g14 found; g07's 7 overlapping walls → 2 |
+| Blinds and interior clutter behind the glass read as bars (g13 rows 20, g04 walls 17 and 8 columns wide) | The storey question to the model now also asks columns and rows (same call). If the photo shows over 2× the model's count, keep only the strongest bars near the model's scale. The model undercounts big grids (g15: 14 vs 25), so it never sets the count itself | g04: 3 and 5 bays, rows on the real transoms; g13: 175 → 83 panes (≈55–65 true) |
+| "glass facade" outlined a hotel's punched-window facade as one glass wall ($176,742) | The same call asks whether the outline is glass edge to edge or separate windows in masonry; majority "separate" drops it | Doubletree back to its ordinary per-floor counts, identical to before |
+
+House benchmark unchanged at 83%. Time: ~2–3.5 s of grid per photo on a laptop.
+
+**Known limits.** Staggered transoms (Burke's Midlands photo: panes of mixed heights) are counted by the
+full-width bars only: **77 panes, where every sub-pane would be ~150**. That is the panes-vs-windows
+question for Burke. The storey estimate on tall glass still varies run to run (g15: 5 to 8), hence the
+storey control. Where SAM cuts a palm or a post out of the outline, the panes behind it are missed.
+
 ## P1: accuracy (the product is only as good as this)
 
 Ranked by how much they move the count per hour of work:

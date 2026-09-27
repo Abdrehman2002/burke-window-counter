@@ -48,6 +48,7 @@ Other tools:
 - `python counter.py photo.jpg` counts one photo from the command line.
 - `python test_batch.py test-photos` runs a folder and writes a contact sheet.
 - `python eval.py --runs 2` scores against hand counts. Run it after every change to the counting logic.
+- `python glass_bench.py` scores the glass-wall pane grid on synthetic walls with exact grids (no network). Run it after any change to `glass_grid`.
 
 ## Deploy (Vercel)
 
