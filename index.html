@@ -175,6 +175,8 @@
              border: 1px solid var(--line); border-radius: 12px; background: var(--sunk); }
   .pickbar.ask { border-color: var(--warn); background: var(--warn-soft); }
   .pickbar.on { border-color: var(--accent); background: var(--accent-soft); }
+  .glassbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 13px; padding: 8px 12px;
+              border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 12px; }
   .pickbar .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .pickbar .pickacts { margin-left: auto; display: flex; gap: 8px; }
   .pickbar .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 4px 12px; font-size: 13px; font-weight: 500; }
@@ -604,8 +606,10 @@ const edgeSet = r => new Set(r.boxes.map((b, i) => skipped(b) ? i : -1).filter(i
 // Everything the viewer can change on one side: which boxes count, which floor each box is on, per-floor
 // +/- adjustments, and how many floors there are.
 const sideState = (res, img, orig) => {
+  const gs = {};  // glass walls: how many storeys each spans (the AI's estimate until the viewer changes it)
+  (res.regions || []).forEach(r => { if (r.glass) gs[r.id] = r.storeys || 1; });
   return { res, img, orig: orig || null, removed: edgeSet(res), adjust: {}, fl: res.boxes.map(b => b.floor),
-           sel: res.regions ? new Set(res.selected || []) : null, touched: false, added: 0, kb: null };
+           sel: res.regions ? new Set(res.selected || []) : null, touched: false, added: 0, kb: null, gs };
 };
 // Is window i in a building / wall the viewer is quoting?
 const inSel = (q, i) => !q.sel || q.sel.has(q.res.boxes[i].region);
@@ -614,6 +618,15 @@ function selFloors(q) {
   let m = 0;
   q.res.boxes.forEach((b, i) => { if (inSel(q, i)) m = Math.max(m, q.fl[i]); });
   return Math.max(1, m);
+}
+// A glass wall's panes take their storey from their height up the wall, split into that wall's storeys
+const storeyOf = (gy, n) => Math.max(1, Math.min(n, Math.floor(gy * n) + 1));
+function setGlassStoreys(side, id, n) {
+  const q = S.quote.sides[side];
+  n = Math.max(1, Math.min(60, n));
+  q.gs[id] = n;
+  q.res.boxes.forEach((b, i) => { if (b.region === id && b.kind === "panel") q.fl[i] = storeyOf(b.gy || 0, n); });
+  renderWork(); toast(`Glass wall set to ${n} storey${n > 1 ? "s" : ""}`);
 }
 // Floors shown: the chosen buildings' floors plus any the viewer added on top
 const nfOf = q => selFloors(q) + q.added;
@@ -640,7 +653,8 @@ function floorsOf(side) {
 function sideEdited(side) {
   const q = S.quote.sides[side], r = q.res;
   const selChanged = q.sel && (q.sel.size !== (r.selected || []).length || (r.selected || []).some(id => !q.sel.has(id)));
-  return q.added > 0 || selChanged || Object.values(q.adjust).some(v => v) ||
+  const gsChanged = (r.regions || []).some(g => g.glass && q.gs && q.gs[g.id] !== (g.storeys || 1));
+  return q.added > 0 || selChanged || gsChanged || Object.values(q.adjust).some(v => v) ||
          r.boxes.some((b, i) => q.fl[i] !== b.floor || q.removed.has(i) !== skipped(b));
 }
 // Things to check on a side: floors holding an unsure box, plus one if the floor split itself is doubtful
@@ -1048,6 +1062,7 @@ function renderSide(side) {
     <div class="sidegrid">
       <div class="viewer">
         ${pickBar(side)}
+        ${glassBar(side)}
         <div class="canvaswrap"><canvas id="cv" tabindex="0" data-fk="cv" role="img" aria-label="${side} photo with each window boxed and coloured by floor. Use the arrow keys to move between windows and Enter to change one."></canvas></div>
         <div class="legend">
           <span><i style="border-color:var(--accent)"></i>Counted window</span>
@@ -1087,8 +1102,10 @@ function renderSide(side) {
   $("tabbody").querySelectorAll("[data-region]").forEach(b => b.addEventListener("click", () => toggleRegion(side, +b.dataset.region)));
   $("drawarea")?.addEventListener("click", () => { if (S.drawing) { S.drawing(); return; } startDrawArea(side); });
   $("zoomtoggle")?.addEventListener("click", () => { q.full = !q.full; renderWork(); });
+  $("tabbody").querySelectorAll("[data-gs]").forEach(b => b.addEventListener("click", () =>
+    setGlassStoreys(side, +b.dataset.gs, q.gs[+b.dataset.gs] + (+b.dataset.d))));
   $("backregions")?.addEventListener("click", () => { S.quote.sides[side] = sideState(q.orig, q.img); renderWork(); toast("Back to the buildings found in the photo"); });
-  $("tabbody").querySelectorAll(".step button").forEach(b => b.addEventListener("click", () => {
+  $("tabbody").querySelectorAll(".step button[data-f]").forEach(b => b.addEventListener("click", () => {
     const f = +b.dataset.f, d = +b.dataset.d, line = floorsOf(side).find(l => l.floor === f);
     if (d < 0 && line.windows === 0) return;
     q.adjust[f] = (q.adjust[f] || 0) + d; renderWork();
@@ -1113,6 +1130,20 @@ function zoomChip(q) {
   const zoomed = viewOf(Object.assign({}, q, { full: false })).zoomed;
   if (!zoomed) return "";
   return `<button class="chip" id="zoomtoggle" data-fk="zoomtoggle" type="button">${q.full ? "Zoom to the building" : "Show whole photo"}</button>`;
+}
+
+// For each glass wall being quoted: how many storeys it spans. Panes are priced by storey, not by row of
+// glass, and the AI's storey estimate is often off on tall glass, so it is one tap to correct.
+function glassBar(side) {
+  const q = S.quote.sides[side];
+  const gl = (q.res.regions || []).filter(r => r.glass && (!q.sel || q.sel.has(r.id)));
+  return gl.map(r => `<div class="glassbar">
+      <span><b>${esc(r.label)}</b> · ${r.windows} panes · spans</span>
+      <span class="step"><button type="button" data-gs="${r.id}" data-d="-1" data-fk="gs-${r.id}-m" aria-label="One storey fewer">−</button>
+        <output class="num">${q.gs[r.id]}</output>
+        <button type="button" data-gs="${r.id}" data-d="1" data-fk="gs-${r.id}-p" aria-label="One storey more">+</button></span>
+      <span>storey${q.gs[r.id] > 1 ? "s" : ""}${q.gs[r.id] === (r.storeys || 1) ? ' <span class="muted">(estimated: check it)</span>' : ""}</span>
+    </div>`).join("");
 }
 
 // Above the photo: which buildings / walls this side's quote covers, and the draw-your-own-area tool.

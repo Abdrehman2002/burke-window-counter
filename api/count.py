@@ -109,11 +109,13 @@ def process(body: bytes, access_code: str | None = None, ip: str = "local") -> t
     return 200, {
         "width": img.width, "height": img.height,
         "boxes": [{"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "conf": b.conf, "floor": int(b.floor),
-                   "edge": bool(b.edge), "other_side": bool(b.other_side), "weak": bool(b.weak), "region": int(b.region)}
+                   "edge": bool(b.edge), "other_side": bool(b.other_side), "weak": bool(b.weak), "region": int(b.region),
+                   "kind": b.kind, "gy": round(float(b.gy), 4)}
                   for b in res.boxes],
         "regions": [{"id": r["id"], "label": r["label"], "polygon": r["polygon"], "windows": int(r["windows"]),
                      "n_floors": int(r.get("n_floors") or 0), "note": r.get("note", ""),
-                     "floors_check": bool(r.get("floors_check"))} for r in res.regions],
+                     "floors_check": bool(r.get("floors_check")), "glass": bool(r.get("glass")),
+                     "storeys": int(r.get("storeys") or 0)} for r in res.regions],
         "selected": list(res.selected),
         "n_floors": len(res.floors), "note": res.note, "floors_check": bool(res.floors_check),
         "seconds": round(time.time() - t, 1),

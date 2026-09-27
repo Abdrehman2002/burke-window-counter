@@ -73,6 +73,7 @@ class Box:
     weak: bool = False  # the detector was under WEAK_BELOW sure: shown as a suggestion, not counted
     region: int = 0  # which building / wall of the photo this window belongs to (see Region)
     group: int = -1  # glass-wall index for curtain-wall panels (-1 for ordinary windows)
+    gy: float = 0.0  # glass panels: height up the glass wall, 0 = bottom edge, 1 = top edge
     kind: str = "window"  # which prompt found it: "window", a glass-door prompt, or "door" (solid door, not counted)
 
     @property
@@ -1141,8 +1142,9 @@ def find_regions(img: Image.Image, boxes: list[Box], polys) -> list[dict]:
     gpolys = getattr(apply_glass_walls, "polys", [])
     for gi, bs in glass.items():
         poly = gpolys[gi] if gi < len(gpolys) else _hull([(x, y) for b in bs for x, y in ((b.x0, b.y0), (b.x1, b.y1))])
+        st = getattr(apply_glass_walls, "storeys", [])
         regions.append({"boxes": bs, "polygon": [[float(x), float(y)] for x, y in poly], "wall": None,
-                        "building": f"glass{gi}", "glass": True})
+                        "building": f"glass{gi}", "glass": True, "storeys": st[gi] if gi < len(st) else 1})
     regions.sort(key=lambda r: np.median([(b.x0 + b.x1) / 2 for b in r["boxes"]]))
     bnum = {}
     for i, r in enumerate(regions):
@@ -1287,45 +1289,85 @@ def _peaks(profile, min_dist, k=1.0):
     return sorted(out)
 
 
-def glass_grid(img, poly):
-    """Panels of a glass curtain wall, from its frame grid. Inside the glass outline, frame bars are strong
-    straight edges: vertical bars show as peaks in the sideways edge profile, and within each strip
-    between them the horizontal bars show as peaks in the up-down profile (done strip by strip, so
-    floors that slope in perspective are still found). Returns panel boxes."""
+def glass_grid(img, poly, kv=0.8, kh=1.0):
+    """Panes of a glass curtain wall, from its frame grid. Frame bars are darker than the glass around
+    them, so inside the glass outline, darkness against a blurred background peaks on every bar:
+    vertical bars from the column profile, then horizontal bars strip by strip between them (so rows
+    that slope in perspective are still found). Returns (x0, y0, x1, y1, gy) per pane, where gy is the
+    pane's height up the wall from 0 (bottom) to 1 (top)."""
+    from PIL import ImageFilter
     P = np.array(poly, dtype=float)
     x0, y0, x1, y1 = [int(v) for v in (P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max())]
-    crop = np.asarray(img.crop((x0, y0, x1, y1)).convert("L"), dtype=float)
-    m = Image.new("L", (x1 - x0, y1 - y0), 0)
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return []
+    crop = img.crop((x0, y0, x1, y1)).convert("L")
+    g = np.asarray(crop, dtype=float)
+    H, W = g.shape
+    m = Image.new("L", (W, H), 0)
     ImageDraw.Draw(m).polygon([(x - x0, y - y0) for x, y in poly], fill=1)
     mask = np.asarray(m, dtype=bool)
-    H, W = crop.shape
-    gx = np.abs(np.diff(crop, axis=1)); gy = np.abs(np.diff(crop, axis=0))
-    mx = mask[:, 1:] & mask[:, :-1]; my = mask[1:, :] & mask[:-1, :]
-    colw = np.maximum(mx.sum(0), 1)
-    V = (gx * mx).sum(0) / colw
-    V[mx.sum(0) < 0.3 * H] = 0
-    vx = _peaks(V, max(12, int(0.035 * W)))
-    left, right = np.where(mask.any(0))[0][[0, -1]]
-    bounds = sorted(set([left] + [x for x in vx if left + 6 < x < right - 6] + [right]))
-    panels = []
+    bg = np.asarray(crop.filter(ImageFilter.BoxBlur(max(3, W // 40))), dtype=float)
+    dark = np.clip(bg - g, 0, None) * mask
+    V = dark.sum(0) / np.maximum(mask.sum(0), 1)
+    V[mask.sum(0) < 0.3 * H] = 0
+    vx = _peaks(V, max(6, int(0.02 * W)), k=kv)
+    cols = np.where(mask.any(0))[0]
+    if not len(cols):
+        return []
+    left, right = cols[0], cols[-1]
+    bounds = sorted(set([left] + [x for x in vx if left + 4 < x < right - 4] + [right]))
+    panes = []
     for a, b in zip(bounds, bounds[1:]):
-        if b - a < 8:
+        if b - a < 5:
             continue
         sl = slice(a, b)
-        rowsm = my[:, sl]
-        Hp = (gy[:, sl] * rowsm).sum(1) / np.maximum(rowsm.sum(1), 1)
-        Hp[rowsm.sum(1) < 0.5 * (b - a)] = 0
-        ys = np.where(mask[:, sl].any(1))[0]
+        cm = mask[:, sl]
+        Hp = dark[:, sl].sum(1) / np.maximum(cm.sum(1), 1)
+        Hp[cm.sum(1) < 0.5 * (b - a)] = 0
+        ys = np.where(cm.any(1))[0]
         if not len(ys):
             continue
         top, bot = ys[0], ys[-1]
-        hy = _peaks(Hp, max(10, int(0.06 * H)), k=1.3)  # stricter: reflections make weak, close lines
-        yb = sorted(set([top] + [y for y in hy if top + 6 < y < bot - 6] + [bot]))
-        cells = [(t, u) for t, u in zip(yb, yb[1:]) if u - t >= 8 and mask[t:u, sl].mean() >= 0.5]
-        for rank, (t, u) in enumerate(reversed(cells)):  # rank 0 = the bottom row of this strip
-            panels.append((x0 + a, y0 + t, x0 + b, y0 + u, rank))
-    return panels
+        hy = _peaks(Hp, max(6, int(0.04 * H)), k=kh)
+        yb = sorted(set([top] + [y for y in hy if top + 4 < y < bot - 4] + [bot]))
+        for t, u in zip(yb, yb[1:]):
+            if u - t >= 5 and cm[t:u].mean() >= 0.5:
+                gy = 1 - ((t + u) / 2 - top) / max(1, bot - top)
+                panes.append((x0 + a, y0 + t, x0 + b, y0 + u, float(min(1, max(0, gy)))))
+    return panes
 
+
+GLASS_STOREYS_PROMPT = (
+    "This photo shows a building with a glass curtain wall (outlined in cyan). How many storeys (floor "
+    "levels) of the building does that glass wall span, from its bottom edge to its top edge? Count floor "
+    "levels of the building, NOT rows of glass panes: one storey usually has 2 to 4 rows of panes, and a "
+    "tall lobby can be one storey. Look for floor slabs, ceilings or spandrel bands seen through the glass, "
+    "doors (a door is on storey 1), and the height of people, benches or trees for scale. "
+    'Return JSON only: {"storeys": 2}')
+
+
+def glass_storeys(img: Image.Image, poly) -> int | None:
+    """The model's estimate (median of 3) of how many storeys a glass wall spans. None if unavailable."""
+    if not os.environ.get("OPENAI_API_KEY") or remaining() < 15:
+        return None
+    pic = img.copy()
+    ImageDraw.Draw(pic).polygon([tuple(p) for p in poly], outline=(0, 255, 255), width=max(3, img.width // 300))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(VOTES) as ex:
+        futs = [ex.submit(_openai_json, pic, GLASS_STOREYS_PROMPT) for _ in range(VOTES)]
+    vals = []
+    for f in futs:
+        try:
+            v = _as_int(json.loads(f.result()).get("storeys"))
+            if 1 <= v <= 60:
+                vals.append(v)
+        except Exception:
+            pass
+    return int(round(float(np.median(vals)))) if vals else None
+
+
+def storey_of(gy: float, n: int) -> int:
+    return max(1, min(n, int(gy * n) + 1))
 
 
 def apply_glass_walls(img: Image.Image, boxes: list[Box], glass_polys, building_polys=()) -> tuple[list[Box], int]:
@@ -1366,15 +1408,21 @@ def apply_glass_walls(img: Image.Image, boxes: list[Box], glass_polys, building_
         return any(0 <= y < m.shape[0] and 0 <= x < m.shape[1] and m[y, x] for m in masks)
     kept = [b for b in boxes if not inside(b)]
     panels = []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max(1, len(glass_polys))) as ex:
+        storeys = list(ex.map(lambda p: glass_storeys(img, p), glass_polys))
     for gi, p in enumerate(glass_polys):
-        for x0, y0, x1, y1, rank in glass_grid(img, p):
+        n = storeys[gi] or 1
+        for x0, y0, x1, y1, gy in glass_grid(img, p):
             panels.append(Box(float(x0), float(y0), float(x1), float(y1), CHECK_BELOW - 0.01,
-                              floor=rank + 1, group=gi, kind="panel"))
+                              floor=storey_of(gy, n), group=gi, kind="panel", gy=gy))
     apply_glass_walls.polys = glass_polys
+    apply_glass_walls.storeys = [v or 1 for v in storeys]
     return kept + panels, len(panels)
 
 
 apply_glass_walls.polys = []
+apply_glass_walls.storeys = []
 
 
 # ---------- 3. price ----------
@@ -1624,8 +1672,9 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
     # Kept and drawn, but not counted unless clicked back.
     W = img.width
     for b in boxes:
-        b.edge = bool(b.x0 < 0.012 * W or b.x1 > 0.988 * W)
-        b.weak = bool(b.conf < WEAK_BELOW)
+        # a glass wall that fills the frame still counts, so its panes are never "cut off at the edge"
+        b.edge = bool(b.kind != "panel" and (b.x0 < 0.012 * W or b.x1 > 0.988 * W))
+        b.weak = bool(b.kind != "panel" and b.conf < WEAK_BELOW)
     if VERIFY and floors == "ai" and os.environ.get("OPENAI_API_KEY"):
         # Doubtful detections (between the candidate threshold and WEAK_BELOW) get a close-up check.
         strong = [b for b in boxes if not b.weak]
@@ -1689,8 +1738,9 @@ def run_side(img: Image.Image, name="side", detector="sam3", thresh=0.4,
                          "may be missing. Count again, or check the floors.").strip()
     for r in regions:
         if any(b.kind == "panel" for b in r["boxes"]):
-            r["note"] = (r["note"] + " Glass wall: panels were counted from its frame grid, which is an "
-                         "estimate. Check them, or use + and − per floor.").strip()
+            r["note"] = (r["note"] + " Glass wall: panes counted from its frame grid and split across "
+                         + str(r.get("storeys", 1)) + " storey(s) by height. Both are estimates: set the storeys "
+                         "above the photo if that is wrong, and check the pane count.").strip()
             r["floors_check"] = True
     res.floors_check = any(r["floors_check"] for r in sel) or bool(getattr(detect_sam3, "failed_tiles", 0))
     res.note = " ".join(r["note"] for r in sel if r["note"])
