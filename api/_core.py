@@ -1261,6 +1261,11 @@ GLASS_MIN_AREA = 0.02  # glass outlines smaller than this share of the photo are
 GLASS_WALL_PROMPTS = ("glass curtain wall", "glass facade")
 
 
+class GlassPoly(list):
+    """A glass-wall outline (a list of points) that remembers which SAM 3 wording found it."""
+    prompt = ""
+
+
 def segment_glass(img: Image.Image) -> list:
     """SAM 3 glass-wall outlines (a separate request, so it can't change the window results). Two wordings in
     one call: "glass curtain wall" alone found nothing on a plain blue grid facade that "glass facade" outlines
@@ -1269,18 +1274,22 @@ def segment_glass(img: Image.Image) -> list:
                            "prompts": [{"type": "text", "text": t} for t in GLASS_WALL_PROMPTS],
                            "output_prob_thresh": 0.4, "format": "polygon"})
     polys = []
-    for res in data["prompt_results"]:
+    for text, res in zip(GLASS_WALL_PROMPTS, data["prompt_results"]):
         for p in res["predictions"]:
             rings = [m for m in p["masks"] if len(m) >= 3]
             if rings:
-                ring = max(rings, key=_poly_area)
+                ring = GlassPoly(max(rings, key=_poly_area))
+                ring.prompt = text
                 if _poly_area(ring) > GLASS_MIN_AREA * img.width * img.height:
                     polys.append(ring)
     masks = [_raster(p, img.size) for p in polys]
     keep = []
     for i in sorted(range(len(polys)), key=lambda i: -masks[i].sum()):
-        if all((masks[i] & masks[j]).sum() < 0.5 * masks[i].sum() for j in keep):
+        same = [j for j in keep if (masks[i] & masks[j]).sum() >= 0.5 * masks[i].sum()]
+        if not same:
             keep.append(i)
+        elif polys[i].prompt == GLASS_WALL_PROMPTS[0]:
+            polys[same[0]].prompt = GLASS_WALL_PROMPTS[0]  # both wordings found this wall
     return [polys[i] for i in keep]
 
 
@@ -1619,7 +1628,10 @@ def apply_glass_walls(img: Image.Image, boxes: list[Box], glass_polys, building_
     # "glass facade" also outlines ordinary facades of windows set in brick or concrete (a hotel tower read as
     # one glass wall came to $176,742). The model says which it is; a wall of separate windows keeps its
     # ordinary window count.
-    keep = [i for i, sv in enumerate(surveys) if sv.get("glass_wall", True)]
+    # Without the model's answer (no key, out of time, out of credits), only the stricter wording counts:
+    # "glass facade" alone is exactly what outlined the hotel.
+    keep = [i for i, sv in enumerate(surveys)
+            if sv.get("glass_wall", getattr(glass_polys[i], "prompt", "") != "glass facade")]
     glass_polys = [glass_polys[i] for i in keep]
     surveys = [surveys[i] for i in keep]
     if not glass_polys:
