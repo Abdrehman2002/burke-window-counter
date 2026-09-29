@@ -396,10 +396,10 @@ def verify_candidates(img: Image.Image, cands: list[Box], provider="openai"):
             b.conf = max(b.conf, CHECK_BELOW if yes == len(votes) else min(b.conf, CHECK_BELOW - 0.01))
 
 
-# Burke's rule is still open: is a window split into small panes one window or several? Default: one
-# window per frame, so a band of small panes in one frame (a transom over a shop front) counts once.
-# COUNT_PANES=1 counts every pane.
-COUNT_PANES = os.environ.get("COUNT_PANES", "0") == "1"
+# Burke prices per PANE (his answer, 2026-09-29), so a band of small panes in one frame (a transom over a
+# shop front) counts every pane. COUNT_PANES=0 goes back to one per frame; eval.py's hand counts are per
+# window, so run it with COUNT_PANES=0.
+COUNT_PANES = os.environ.get("COUNT_PANES", "1") == "1"
 
 
 def _is_divided_window(big: Box, inside: list[Box]) -> bool:
@@ -1292,6 +1292,9 @@ GRID_COVER = 0.6       # a bar must run at least this much of the length a typic
 GRID_FILL = 0.25       # fill a missing bar only where the photo shows at least this share of a bar's strength
 GRID_HINT_X = 2.0      # more bars than this multiple of the model's count: the extras are blinds or reflections
 GRID_HINT_KEEP = 1.2   # ...then keep the strongest bars, up to this multiple of the model's count
+GRID_STRIP = 0.7       # a column may add its own crossbar (staggered grids) at this share of a full-width bar's
+                       # strength, if it has both edges of a bar. Burke prices per pane (2026-09-29), so the
+                       # sub-panes of a staggered grid count. Synthetic error 4.2% -> 3.1%; Midlands 77 -> 117
 
 
 def _smooth(h, s):
@@ -1413,6 +1416,7 @@ def glass_grid(img, poly, cols_hint=None, rows_hint=None):
     if len(xs) < 100:
         return []
     ax, ay = np.abs(gx_[ys, xs]), np.abs(gy_[ys, xs])
+    sgn = np.sign(gy_[ys, xs])
     px, py = (xs - W / 2) / S, (ys - H / 2) / S
     rng = np.random.default_rng(0)
 
@@ -1424,6 +1428,7 @@ def glass_grid(img, poly, cols_hint=None, rows_hint=None):
         return idx, wgt[idx]
     thr = np.percentile(np.hypot(ax, ay), 60)
     ih, wh = pick((ay > 1.5 * ax) & (ay > thr), ay)  # horizontal bars: brightness changes up-down
+    sgh = sgn[ih]
     iv, wv = pick((ax > 1.5 * ay) & (ax > thr), ax)
     if len(ih) < 50 or len(iv) < 50:
         return []
@@ -1478,14 +1483,45 @@ def glass_grid(img, poly, cols_hint=None, rows_hint=None):
                     h[max(0, i - half):i + half + 1] = 0
         span_px = span_n * S
         gap = max(4, int(max(GRID_MIN_GAP * S, 10) * nb / (1.1 * span_px)))
+        bars.last = (r0, r1, nb, gap, tb(lo), tb(hi))
         return [r0 + b / nb * (r1 - r0) for b in _bars(h, tb(lo), tb(hi), gap, hint)]
     wa_lo, wa_hi = np.interp([a_lo, a_hi], grid_a, wa)
     wc_lo, wc_hi = np.interp([c_lo, c_hi], grid_c, wc)
-    A = np.interp(bars(vote_a, wh, wa_lo, wa_hi, a_hi - a_lo, px[ih], rows_hint), wa, grid_a)
+    Aw = bars(vote_a, wh, wa_lo, wa_hi, a_hi - a_lo, px[ih], rows_hint)
+    ar0, ar1, anb, amg, alo, ahi = bars.last
+    A = list(np.interp(Aw, wa, grid_a))
     C = np.interp(bars(vote_c, wv, wc_lo, wc_hi, c_hi - c_lo, py[iv], cols_hint), wc, grid_c)
+    # Rows column by column: full-width crossbars come from the whole wall, and a column may add its own
+    # shorter ones (a staggered grid), when they are about as strong there and have both edges of a bar
+    # (light-to-dark and dark-to-light close together). A lone edge, such as a spandrel's, is not a bar.
+    uch = (px[ih] - t0 * py[ih]) / (1 + t1 * py[ih])
+    gbin = [int(round((v - ar0) / (ar1 - ar0) * anb)) for v in Aw]
+    to_a = lambda ks: list(np.interp([ar0 + k / anb * (ar1 - ar0) for k in ks], wa, grid_a))
+    col_rows = []
+    for i in range(len(C) - 1):
+        rows_i = A
+        w_ = C[i + 1] - C[i]
+        sel = (uch > C[i] + 0.15 * w_) & (uch < C[i + 1] - 0.15 * w_)
+        if GRID_STRIP and len(gbin) > 2 and sel.sum() > 30:
+            hist = lambda wt: _smooth(np.histogram(vote_a[sel], bins=anb, range=(ar0, ar1), weights=wt[sel])[0], 1.2)
+            hs, hp, hn = hist(wh), hist(wh * (sgh > 0)), hist(wh * (sgh < 0))
+            bw = max(3, amg // 2)
+            ref = float(np.median([hs[max(0, b - 2):b + 3].max() for b in gbin[1:-1]]))
+            extra = []
+            if ref > 0:
+                for k in sorted((k for k in range(max(1, alo + amg + 1), min(anb - 1, ahi - amg))
+                                 if hs[k] >= hs[k - 1] and hs[k] >= hs[k + 1] and hs[k] >= GRID_STRIP * ref),
+                                key=lambda k: -hs[k]):
+                    p, n = hp[max(0, k - bw):k + bw + 1].max(), hn[max(0, k - bw):k + bw + 1].max()
+                    if all(abs(k - g) >= amg for g in gbin + extra) and min(p, n) >= 0.5 * max(p, n):
+                        extra.append(k)
+            if extra and not (rows_hint and len(Aw) - 1 + len(extra) > GRID_HINT_X * rows_hint + 1):
+                rows_i = sorted(A + to_a(extra))
+        col_rows.append(rows_i)
     panes = []
-    for j in range(len(A) - 1):
-        for i in range(len(C) - 1):
+    for i in range(len(C) - 1):
+        A = col_rows[i]
+        for j in range(len(A) - 1):
             pts = [meet(a, c) for a in (A[j], A[j + 1]) for c in (C[i], C[i + 1])]
             xs_ = [p[0] * S + W / 2 for p in pts]
             ys_ = [p[1] * S + H / 2 for p in pts]

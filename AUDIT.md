@@ -140,9 +140,15 @@ Real photos, which the synthetic walls can't fully stand in for:
 
 House benchmark unchanged at 83%. Time: ~2–3.5 s of grid per photo on a laptop.
 
-**Known limits.** Staggered transoms (Burke's Midlands photo: panes of mixed heights) are counted by the
-full-width bars only: **77 panes, where every sub-pane would be ~150**. That is the panes-vs-windows
-question for Burke. The storey estimate on tall glass still varies run to run (g15: 5 to 8), hence the
+**Burke answered 2026-09-29: he prices per PANE.** So (1) `COUNT_PANES` now defaults to 1: every pane of a
+transom or ribbon band counts; (2) glass walls count the sub-panes of a staggered grid. Each column may add
+its own crossbar when it is at least 0.7x as strong there as a full-width bar AND has both edges of a bar
+(light-to-dark and dark-to-light close together); a lone edge, such as a spandrel's, is not a bar. That gate
+is what made it work: without it the same step broke 18 of 60 synthetic walls. Synthetic error **4.2% -> 2.8%**;
+Midlands **77 -> 117** (~150 by eye); g15 unchanged at 418. Cost: g13's blinds behind frameless glass read as
+bars, 83 -> 108 (~55-65 true), and g04 picks up an interior balcony rail seen through the glass.
+
+**Known limits.** Midlands still reads 117 of ~150 sub-panes. The storey estimate on tall glass still varies run to run (g15: 5 to 8), hence the
 storey control. Where SAM cuts a palm or a post out of the outline, the panes behind it are missed.
 
 ## P1: accuracy (the product is only as good as this)
